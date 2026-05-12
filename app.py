@@ -380,7 +380,7 @@ def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Ma
     m = folium.Map(
         location=[39.4697, -0.3774],
         zoom_start=12,
-        tiles="CartoDB dark_matter",
+        tiles="CartoDB positron",
     )
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
     dt_label = (now + timedelta(hours=hour_idx)).strftime("%d/%m/%Y %H:%M")
@@ -394,7 +394,7 @@ def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Ma
         is_selected = name == selected
 
         radius = 14 if is_selected else 10
-        border = "#ffffff" if is_selected else "#0d1117"
+        border = "#ffffff" if is_selected else "#555555"
         border_w = 3 if is_selected else 1.5
 
         popup_html = f"""
@@ -428,8 +428,9 @@ def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Ma
     # Leyenda
     legend_html = """
     <div style="position:fixed;bottom:30px;left:30px;z-index:9999;
-                background:#161b22;border:1px solid #30363d;border-radius:8px;
-                padding:12px 16px;font-family:'DM Sans',sans-serif;color:#e6edf3;font-size:12px;">
+                background:white;border:1px solid #ccc;border-radius:8px;
+                padding:12px 16px;font-family:'DM Sans',sans-serif;color:#333;font-size:12px;
+                box-shadow:0 2px 8px rgba(0,0,0,0.15);">
       <b style="font-family:'Space Mono',monospace">PM2.5 µg/m³</b><br>
       <span style="color:#3fb950">●</span> &lt;12 · Buena<br>
       <span style="color:#d29922">●</span> 12–35 · Moderada<br>
