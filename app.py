@@ -52,26 +52,27 @@ html, body, [class*="css"] {
 }
 h1, h2, h3 { font-family: 'Space Mono', monospace; }
 
-.stApp { background: #0d1117; color: #e6edf3; }
+.stApp { background: #f6f8fa; color: #1f2328; }
 
 .metric-card {
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #d0d7de;
     border-radius: 8px;
     padding: 16px 20px;
     margin-bottom: 8px;
+    box-shadow: 0 1px 3px rgba(31,35,40,0.06);
 }
-.metric-card .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+.metric-card .label { font-size: 11px; color: #57606a; text-transform: uppercase; letter-spacing: 1px; }
 .metric-card .value { font-size: 28px; font-family: 'Space Mono', monospace; font-weight: 700; }
 
-.aqi-good    { color: #3fb950; }
-.aqi-moderate{ color: #d29922; }
-.aqi-usg     { color: #f0883e; }
-.aqi-unhealthy{ color: #da3633; }
+.aqi-good    { color: #1a7f37; }
+.aqi-moderate{ color: #9a6700; }
+.aqi-usg     { color: #bc4c00; }
+.aqi-unhealthy{ color: #cf222e; }
 
 section[data-testid="stSidebar"] {
-    background: #161b22;
-    border-right: 1px solid #30363d;
+    background: #ffffff;
+    border-right: 1px solid #d0d7de;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -465,14 +466,15 @@ def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Ma
         border_w = 3 if is_selected else 1.5
 
         popup_html = f"""
-        <div style="font-family:'DM Sans',sans-serif;min-width:200px;background:#161b22;
-                    color:#e6edf3;padding:12px;border-radius:8px;border:1px solid #30363d;">
+        <div style="font-family:'DM Sans',sans-serif;min-width:200px;background:#ffffff;
+                    color:#1f2328;padding:12px;border-radius:8px;border:1px solid #d0d7de;
+                    box-shadow:0 2px 8px rgba(31,35,40,0.12);">
           <b style="font-family:'Space Mono',monospace;font-size:13px">{name}</b><br>
-          <hr style="border-color:#30363d;margin:6px 0">
-          <span style="font-size:11px;color:#8b949e">AHORA (t=0)</span><br>
+          <hr style="border-color:#d0d7de;margin:6px 0">
+          <span style="font-size:11px;color:#57606a">AHORA (t=0)</span><br>
           <span style="font-size:22px;font-weight:700;color:{pm25_color(current)}">{current:.1f} µg/m³</span>
           <br><br>
-          <span style="font-size:11px;color:#8b949e">PREVISIÓN · {dt_label}</span><br>
+          <span style="font-size:11px;color:#57606a">PREVISIÓN · {dt_label}</span><br>
           <span style="font-size:22px;font-weight:700;color:{color}">{predicted:.1f} µg/m³</span>
           <br>
           <span style="font-size:11px;color:{color};background:rgba(255,255,255,0.05);
@@ -541,29 +543,29 @@ def build_forecast_chart(forecasts: dict, station: str) -> go.Figure:
     ))
 
     # Marcador t=0
-    fig.add_vline(x=times[0], line_dash="dash", line_color="#8b949e", line_width=1)
+    fig.add_vline(x=times[0], line_dash="dash", line_color="#57606a", line_width=1)
     fig.add_annotation(x=times[0], y=max(fc)*0.9, text="Ahora",
-                       showarrow=False, font=dict(color="#8b949e", size=11))
+                       showarrow=False, font=dict(color="#57606a", size=11))
 
     fig.update_layout(
         title=dict(
             text=f"<b>{station}</b> · Previsión PM2.5 168h",
-            font=dict(family="Space Mono", size=14, color="#e6edf3"),
+            font=dict(family="Space Mono", size=14, color="#1f2328"),
         ),
-        paper_bgcolor="#161b22",
-        plot_bgcolor="#161b22",
-        font=dict(family="DM Sans", color="#8b949e"),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#f6f8fa",
+        font=dict(family="DM Sans", color="#57606a"),
         xaxis=dict(
-            showgrid=True, gridcolor="#21262d", tickformat="%a %d\n%H:%M",
-            color="#8b949e", title=None,
+            showgrid=True, gridcolor="#eaecef", tickformat="%a %d\n%H:%M",
+            color="#57606a", title=None,
         ),
         yaxis=dict(
-            showgrid=True, gridcolor="#21262d", title="µg/m³",
-            color="#8b949e", range=[0, max(max(fc)*1.15, 60)],
+            showgrid=True, gridcolor="#eaecef", title="µg/m³",
+            color="#57606a", range=[0, max(max(fc)*1.15, 60)],
         ),
         margin=dict(l=50, r=20, t=50, b=40),
         height=320,
-        legend=dict(bgcolor="#161b22", bordercolor="#30363d"),
+        legend=dict(bgcolor="#ffffff", bordercolor="#d0d7de"),
         hovermode="x unified",
     )
     return fig
@@ -579,10 +581,10 @@ def main():
 
     # ── Header ──
     st.markdown("""
-    <h1 style="font-size:1.6rem;margin-bottom:0;color:#e6edf3">
+    <h1 style="font-size:1.6rem;margin-bottom:0;color:#1f2328">
       🌿 Calidad del Aire · Valencia
     </h1>
-    <p style="color:#8b949e;font-size:0.85rem;margin-top:4px;font-family:'DM Sans',sans-serif">
+    <p style="color:#57606a;font-size:0.85rem;margin-top:4px;font-family:'DM Sans',sans-serif">
       PM2.5 en tiempo real + previsión LightGBM · 168 horas
     </p>
     """, unsafe_allow_html=True)
@@ -690,9 +692,9 @@ def main():
         <div class="metric-card">
           <div class="label">PM2.5 previsto (+{hour_idx}h)</div>
           <div class="value {cat_color}">{val_pred:.1f} µg/m³
-            <span style="font-size:14px;color:#8b949e"> ({'+' if delta >= 0 else ''}{delta:.1f})</span>
+            <span style="font-size:14px;color:#57606a"> ({'+' if delta >= 0 else ''}{delta:.1f})</span>
           </div>
-          <div style="font-size:12px;color:#8b949e;margin-top:4px">{pm25_label(val_pred)}</div>
+          <div style="font-size:12px;color:#57606a;margin-top:4px">{pm25_label(val_pred)}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -701,12 +703,12 @@ def main():
         <div class="metric-card" style="margin-top:8px">
           <div class="label">Contaminantes actuales</div>
           <div style="display:flex;gap:16px;margin-top:8px">
-            <div><div style="font-size:10px;color:#8b949e">O₃</div>
-                 <div style="font-size:18px;font-family:'Space Mono',monospace">{air.get('O3', 0):.1f}</div></div>
-            <div><div style="font-size:10px;color:#8b949e">NO₂</div>
-                 <div style="font-size:18px;font-family:'Space Mono',monospace">{air.get('NO2', 0):.1f}</div></div>
-            <div><div style="font-size:10px;color:#8b949e">PM2.5</div>
-                 <div style="font-size:18px;font-family:'Space Mono',monospace">{air.get('PM25', val_now):.1f}</div></div>
+            <div><div style="font-size:10px;color:#57606a">O₃</div>
+                 <div style="font-size:18px;font-family:'Space Mono',monospace;color:#1f2328">{air.get('O3', 0):.1f}</div></div>
+            <div><div style="font-size:10px;color:#57606a">NO₂</div>
+                 <div style="font-size:18px;font-family:'Space Mono',monospace;color:#1f2328">{air.get('NO2', 0):.1f}</div></div>
+            <div><div style="font-size:10px;color:#57606a">PM2.5</div>
+                 <div style="font-size:18px;font-family:'Space Mono',monospace;color:#1f2328">{air.get('PM25', val_now):.1f}</div></div>
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -734,8 +736,8 @@ def main():
 
     # ── Footer ──
     st.markdown("""
-    <hr style="border-color:#30363d;margin-top:32px">
-    <p style="text-align:center;font-size:11px;color:#8b949e;font-family:'DM Sans',sans-serif">
+    <hr style="border-color:#d0d7de;margin-top:32px">
+    <p style="text-align:center;font-size:11px;color:#57606a;font-family:'DM Sans',sans-serif">
       Datos: RVVCCA GVA · Meteostat · Modelo LightGBM entrenado localmente
     </p>
     """, unsafe_allow_html=True)
