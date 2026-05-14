@@ -6,6 +6,8 @@ Dashboard Streamlit con modelo LightGBM, scraping en tiempo real y previsión 16
 import warnings
 warnings.filterwarnings("ignore")
 
+import os
+from dotenv import load_dotenv
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,6 +19,21 @@ from bs4 import BeautifulSoup
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import re
+
+load_dotenv()
+
+CHECK_INTERVAL_MINUTES        = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
+MIN_DOWNLOAD_INTERVAL_MINUTES = int(os.getenv("MIN_DOWNLOAD_INTERVAL_MINUTES", "60"))
+AQ_CACHE_FILE    = "cache_air_quality.csv"
+METEO_CACHE_FILE = "cache_meteo.csv"
+
+# Parámetros de normalización min-max usados en el entrenamiento (ajustables en .env)
+NORM_TEMP_MIN    = float(os.getenv("NORM_TEMP_MIN",    "0"))
+NORM_TEMP_MAX    = float(os.getenv("NORM_TEMP_MAX",    "40"))
+NORM_VIENTO_MAX  = float(os.getenv("NORM_VIENTO_MAX",  "100"))
+NORM_PRESION_MIN = float(os.getenv("NORM_PRESION_MIN", "980"))
+NORM_PRESION_MAX = float(os.getenv("NORM_PRESION_MAX", "1040"))
+NORM_PRECIP_MAX  = float(os.getenv("NORM_PRECIP_MAX",  "50"))
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -76,27 +93,27 @@ STATIONS = {
 
 STATION_NAMES = list(STATIONS.keys())
 
-# Label encoding (mismo orden que notebook)
-STATION_LE = {name: idx for idx, name in enumerate(sorted(STATION_NAMES))}
-
-MODEL_FEATURES = [
-    "hour_sin", "hour_cos", "month_sin", "month_cos",
-    "station_encoded",
-    "O3", "NO2",
+# Features del pipeline CBLA (orden exacto del entrenamiento)
+S1_FEATURES = [
+    "Dia_semana", "Hora", "PM25", "NO2", "O3", "SO2", "CO",
     "Velocidad_viento", "Direccion_viento", "Temperatura",
-    "Humedad_relativa", "Presion", "Precipitacion",
-    "PM25_lag1", "PM25_lag2", "PM25_lag3", "PM25_lag6", "PM25_lag12", "PM25_lag24",
-    "PM25_roll3", "PM25_roll6", "PM25_roll12", "PM25_roll24",
-    "O3_lag1", "O3_lag3", "O3_lag6",
-    "NO2_lag1", "NO2_lag3", "NO2_lag6",
-    "viento_lag1", "viento_lag3", "viento_lag6",
-    "temp_lag1", "temp_lag3", "temp_lag6",
-    "hour", "month",
-]  # 37 features
+    "Humedad_relativa", "Presion", "Precipitacion", "Hora_num",
+    "hora_sin", "hora_cos",
+]
+S2_FEATURES = [
+    "s1_pred", "Temperatura", "Humedad_relativa", "Velocidad_viento",
+    "Direccion_viento", "Presion", "Precipitacion", "NO2", "O3", "SO2", "CO",
+    "hora_sin", "hora_cos",
+    "PM25_lag_1h", "PM25_lag_6h", "PM25_lag_24h", "PM25_lag_48h",
+    "PM25_lag_72h", "PM25_lag_120h", "PM25_lag_168h",
+    "PM25_ma_24h", "PM25_ma_72h", "PM25_ma_168h",
+    "dow_sin", "dow_cos", "month_sin", "month_cos",
+]
+SO2_DEFAULT = 0.028   # mediana de entrenamiento (mg/m³)
+CO_DEFAULT  = 0.075   # mediana de entrenamiento (mg/m³)
 
 # ── Scraping ─────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_air_quality() -> dict[str, dict]:
     """Extrae O3, NO2 y PM25 de la red RVVCCA para cada estación."""
     url = "https://rvvcca.pica.gva.es/Castellano/Noticias/ultimas_medidas.asp"
@@ -155,7 +172,6 @@ def fetch_air_quality() -> dict[str, dict]:
     return data
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_meteo(date_str: str) -> dict:
     """Obtiene datos meteorológicos de Meteostat para Valencia (08284)."""
     fallback = {
@@ -193,171 +209,222 @@ def fetch_meteo(date_str: str) -> dict:
         return fallback
 
 
-# ── Modelo ───────────────────────────────────────────────────────────────────
+# ── Caché CSV ────────────────────────────────────────────────────────────────
 
-@st.cache_resource(show_spinner=False)
-def load_model():
+def _get_last_download_time() -> datetime | None:
+    if not os.path.exists(AQ_CACHE_FILE):
+        return None
     try:
-        obj = joblib.load("lgb_PM25_h1.pkl")
-
-        # Caso 1: objeto con .predict() directamente (LGBMRegressor, Pipeline, Booster…)
-        if hasattr(obj, "predict"):
-            return obj
-
-        # Caso 2: dict — buscar el modelo en claves habituales
-        if isinstance(obj, dict):
-            for key in ["model", "estimator", "lgb", "lgbm", "booster",
-                        "regressor", "pipeline", "clf", "reg"]:
-                if key in obj and hasattr(obj[key], "predict"):
-                    return obj[key]
-            # Ninguna clave conocida: mostrar las disponibles para diagnóstico
-            claves = list(obj.keys())
-            st.error(
-                f"❌ El archivo `.pkl` es un `dict` con claves: `{claves}`. "
-                f"Ninguna tiene `.predict()`. "
-                f"Edita `load_model()` en `app.py` y sustituye la clave correcta."
-            )
+        df = pd.read_csv(AQ_CACHE_FILE, nrows=1)
+        if df.empty or "downloaded_at" not in df.columns:
             return None
-
-        st.error(f"❌ Tipo inesperado en el .pkl: `{type(obj)}`. Esperaba un modelo con `.predict()`.")
-        return None
-
-    except FileNotFoundError:
-        st.warning("⚠️ Modelo `lgb_PM25_h1.pkl` no encontrado. Se usará un modelo dummy para demo.")
+        return datetime.fromisoformat(df["downloaded_at"].iloc[0])
+    except Exception:
         return None
 
 
-def cyclic_encode(val: float, period: float):
-    rad = 2 * np.pi * val / period
-    return np.sin(rad), np.cos(rad)
+def _save_air_quality_cache(air_data: dict, ts: datetime) -> None:
+    rows = [{"downloaded_at": ts.isoformat(), "station": s, **v} for s, v in air_data.items()]
+    pd.DataFrame(rows).to_csv(AQ_CACHE_FILE, index=False)
 
 
-def build_feature_row(
-    dt: datetime,
-    station: str,
-    meteo: dict,
-    air: dict,
-    pm25_history: list[float],
-    o3_history: list[float],
-    no2_history: list[float],
-    wind_history: list[float],
-    temp_history: list[float],
-) -> pd.DataFrame:
-    """Construye exactamente las 37 features que espera el modelo."""
+def _save_meteo_cache(meteo: dict, ts: datetime) -> None:
+    pd.DataFrame([{"downloaded_at": ts.isoformat(), **meteo}]).to_csv(METEO_CACHE_FILE, index=False)
 
-    def lag(hist: list[float], n: int) -> float:
-        return hist[-n] if len(hist) >= n else (hist[0] if hist else 0.0)
 
-    def roll(hist: list[float], n: int) -> float:
-        window = hist[-n:] if len(hist) >= n else hist
-        return float(np.mean(window)) if window else 0.0
-
-    hour_sin, hour_cos = cyclic_encode(dt.hour, 24)
-    month_sin, month_cos = cyclic_encode(dt.month, 12)
-
-    row = {
-        "hour_sin":         hour_sin,
-        "hour_cos":         hour_cos,
-        "month_sin":        month_sin,
-        "month_cos":        month_cos,
-        "station_encoded":  STATION_LE[station],
-        "O3":               air.get("O3", 35.0),
-        "NO2":              air.get("NO2", 25.0),
-        "Velocidad_viento": meteo["Velocidad_viento"],
-        "Direccion_viento": meteo["Direccion_viento"],
-        "Temperatura":      meteo["Temperatura"],
-        "Humedad_relativa": meteo["Humedad_relativa"],
-        "Presion":          meteo["Presion"],
-        "Precipitacion":    meteo["Precipitacion"],
-        # PM25 lags
-        "PM25_lag1":   lag(pm25_history, 1),
-        "PM25_lag2":   lag(pm25_history, 2),
-        "PM25_lag3":   lag(pm25_history, 3),
-        "PM25_lag6":   lag(pm25_history, 6),
-        "PM25_lag12":  lag(pm25_history, 12),
-        "PM25_lag24":  lag(pm25_history, 24),
-        # PM25 rolling
-        "PM25_roll3":  roll(pm25_history, 3),
-        "PM25_roll6":  roll(pm25_history, 6),
-        "PM25_roll12": roll(pm25_history, 12),
-        "PM25_roll24": roll(pm25_history, 24),
-        # O3 lags
-        "O3_lag1":  lag(o3_history, 1),
-        "O3_lag3":  lag(o3_history, 3),
-        "O3_lag6":  lag(o3_history, 6),
-        # NO2 lags
-        "NO2_lag1": lag(no2_history, 1),
-        "NO2_lag3": lag(no2_history, 3),
-        "NO2_lag6": lag(no2_history, 6),
-        # Viento lags
-        "viento_lag1": lag(wind_history, 1),
-        "viento_lag3": lag(wind_history, 3),
-        "viento_lag6": lag(wind_history, 6),
-        # Temperatura lags
-        "temp_lag1": lag(temp_history, 1),
-        "temp_lag3": lag(temp_history, 3),
-        "temp_lag6": lag(temp_history, 6),
-        # Raw time
-        "hour":  dt.hour,
-        "month": dt.month,
+def _load_air_quality_cache() -> dict:
+    df = pd.read_csv(AQ_CACHE_FILE)
+    return {
+        row["station"]: {"O3": row["O3"], "NO2": row["NO2"], "PM25": row["PM25"]}
+        for _, row in df.iterrows()
     }
 
-    return pd.DataFrame([row])[MODEL_FEATURES]
+
+def _load_meteo_cache() -> dict:
+    df = pd.read_csv(METEO_CACHE_FILE)
+    row = df.iloc[0].to_dict()
+    row.pop("downloaded_at", None)
+    return row
 
 
-def predict_recursive_168h(model, air_data: dict, meteo: dict) -> dict[str, list[float]]:
-    """
-    Para cada estación, genera predicciones recursivas 168h.
-    Retorna dict station -> lista 169 valores (t=0 actual + 168 predichos).
-    """
-    results: dict[str, list[float]] = {}
+def get_current_data(force: bool = False) -> tuple[dict, dict, bool]:
+    """Devuelve (air_data, meteo, was_refreshed). Descarga solo si ha transcurrido MIN_DOWNLOAD_INTERVAL_MINUTES."""
+    if st.session_state.get("_is_downloading"):
+        last = _get_last_download_time()
+        if last is not None:
+            return _load_air_quality_cache(), _load_meteo_cache(), False
+
+    last = _get_last_download_time()
+    now = datetime.now()
+    elapsed_min = (now - last).total_seconds() / 60 if last else float("inf")
+    should_download = force or elapsed_min >= MIN_DOWNLOAD_INTERVAL_MINUTES
+
+    if not should_download:
+        return _load_air_quality_cache(), _load_meteo_cache(), False
+
+    st.session_state["_is_downloading"] = True
+    try:
+        air_data = fetch_air_quality()
+        meteo = fetch_meteo(now.strftime("%Y-%m-%d"))
+        _save_air_quality_cache(air_data, now)
+        _save_meteo_cache(meteo, now)
+        return air_data, meteo, True
+    except Exception:
+        if last is not None:
+            return _load_air_quality_cache(), _load_meteo_cache(), False
+        raise
+    finally:
+        st.session_state["_is_downloading"] = False
+
+
+# ── Modelos CBLA ─────────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def load_cbla_models():
+    import os as _os
+    _os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    from tensorflow import keras
+    import xgboost as xgb
+
+    s1 = keras.models.load_model("cnn_bilstm_attention_h1.keras")
+    sc = joblib.load("scaler_h1.pkl")
+    s2 = xgb.XGBRegressor()
+    s2.load_model("xgb_meta_model_h1.json")
+    return s1, sc, s2
+
+
+def _norm(val: float, min_val: float, max_val: float) -> float:
+    return float(np.clip((val - min_val) / (max_val - min_val), 0.0, 1.0))
+
+
+def _s1_row(dt: datetime, pm25: float, no2: float, o3: float, meteo: dict) -> list:
+    h = dt.hour
+    return [
+        float(dt.weekday()),
+        float(h),
+        float(pm25),
+        float(no2),
+        float(o3),
+        SO2_DEFAULT,
+        CO_DEFAULT,
+        _norm(meteo["Velocidad_viento"], 0,                NORM_VIENTO_MAX),
+        float(meteo["Direccion_viento"]),
+        _norm(meteo["Temperatura"],      NORM_TEMP_MIN,    NORM_TEMP_MAX),
+        float(meteo["Humedad_relativa"]),
+        _norm(meteo["Presion"],          NORM_PRESION_MIN, NORM_PRESION_MAX),
+        _norm(meteo["Precipitacion"],    0,                NORM_PRECIP_MAX),
+        (h - 11.5) / 6.922,
+        np.sin(2 * np.pi * h / 24),
+        np.cos(2 * np.pi * h / 24),
+    ]
+
+
+def _s2_row(s1_pred: float, dt: datetime, meteo: dict, air: dict, hist: list) -> dict:
+    h = dt.hour
+
+    def lag(n):
+        return float(hist[-n]) if len(hist) >= n else float(hist[0] if hist else 15.0)
+
+    def ma(n):
+        w = hist[-n:] if len(hist) >= n else hist
+        return float(np.mean(w)) if w else 15.0
+
+    return {
+        "s1_pred":          s1_pred,
+        "Temperatura":      _norm(meteo["Temperatura"],      NORM_TEMP_MIN,    NORM_TEMP_MAX),
+        "Humedad_relativa": meteo["Humedad_relativa"],
+        "Velocidad_viento": _norm(meteo["Velocidad_viento"], 0,                NORM_VIENTO_MAX),
+        "Direccion_viento": meteo["Direccion_viento"],
+        "Presion":          _norm(meteo["Presion"],          NORM_PRESION_MIN, NORM_PRESION_MAX),
+        "Precipitacion":    _norm(meteo["Precipitacion"],    0,                NORM_PRECIP_MAX),
+        "NO2":              air.get("NO2", 25.0),
+        "O3":               air.get("O3",  35.0),
+        "SO2":              SO2_DEFAULT,
+        "CO":               CO_DEFAULT,
+        "hora_sin":         np.sin(2 * np.pi * h / 24),
+        "hora_cos":         np.cos(2 * np.pi * h / 24),
+        "PM25_lag_1h":      lag(1),
+        "PM25_lag_6h":      lag(6),
+        "PM25_lag_24h":     lag(24),
+        "PM25_lag_48h":     lag(48),
+        "PM25_lag_72h":     lag(72),
+        "PM25_lag_120h":    lag(120),
+        "PM25_lag_168h":    lag(168),
+        "PM25_ma_24h":      ma(24),
+        "PM25_ma_72h":      ma(72),
+        "PM25_ma_168h":     ma(168),
+        "dow_sin":          np.sin(2 * np.pi * dt.weekday() / 7),
+        "dow_cos":          np.cos(2 * np.pi * dt.weekday() / 7),
+        "month_sin":        np.sin(2 * np.pi * dt.month / 12),
+        "month_cos":        np.cos(2 * np.pi * dt.month / 12),
+    }
+
+
+def predict_cbla_168h(s1_model, s2_model, scaler, air_data: dict, meteo: dict) -> dict[str, list[float]]:
+    """Predicción recursiva 168h usando pipeline CNN-BiLSTM + XGBoost por lotes."""
+    import xgboost as xgb  # noqa: F401 — asegura que xgb está disponible
+
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    n = len(STATION_NAMES)
 
+    # Inicializar historial 169h por estación (168h simulados + t=0)
+    state: dict[str, dict] = {}
     for station in STATION_NAMES:
         air = air_data.get(station, {"O3": 35.0, "NO2": 25.0, "PM25": 15.0})
-        current_pm25 = air.get("PM25", 15.0)
+        pm25_now = air.get("PM25", 15.0)
+        rng = np.random.default_rng(hash(station) % 100_000)
+        hist: list[float] = []
+        val = pm25_now
+        for _ in range(168):
+            val = max(0.0, val + rng.normal(0, 0.3))
+            hist.append(val)
+        hist = list(reversed(hist)) + [pm25_now]  # oldest → newest
+        state[station] = {"air": air, "hist": hist}
 
-        # Historial inicial (24h simulado con decaimiento suave)
-        rng = np.random.default_rng(STATION_LE[station] + 42)
-        base = current_pm25
-        pm25_hist: list[float] = [
-            max(0.0, base + rng.normal(0, 1.5)) for _ in range(24)
+    forecasts: dict[str, list[float]] = {
+        s: [state[s]["air"].get("PM25", 15.0)] for s in STATION_NAMES
+    }
+
+    for h in range(1, 169):
+        dt_h = now + timedelta(hours=h)
+
+        # ── Stage 1: batch (n_stations, 48, 16) ──────────────────────────────
+        batch = []
+        for station in STATION_NAMES:
+            st = state[station]
+            hist = st["hist"]
+            air  = st["air"]
+            win_pm25 = hist[-48:] if len(hist) >= 48 else [hist[0]] * (48 - len(hist)) + hist
+            rows = [
+                _s1_row(
+                    dt_h - timedelta(hours=48 - i),
+                    win_pm25[i],
+                    air.get("NO2", 25.0),
+                    air.get("O3",  35.0),
+                    meteo,
+                )
+                for i in range(48)
+            ]
+            batch.append(rows)
+
+        win_arr = np.array(batch, dtype="float32")                     # (n, 48, 16)
+        win_sc  = scaler.transform(win_arr.reshape(-1, 16)).reshape(n, 48, 16)
+        s1_preds = s1_model.predict(win_sc, verbose=0).ravel()         # (n,)
+
+        # ── Stage 2: batch (n_stations, 27) ──────────────────────────────────
+        s2_rows = [
+            _s2_row(float(s1_preds[i]), dt_h, meteo, state[s]["air"], state[s]["hist"])
+            for i, s in enumerate(STATION_NAMES)
         ]
-        o3_hist:    list[float] = [air.get("O3", 35.0)]   * 24
-        no2_hist:   list[float] = [air.get("NO2", 25.0)]  * 24
-        wind_hist:  list[float] = [meteo["Velocidad_viento"]] * 24
-        temp_hist:  list[float] = [meteo["Temperatura"]]       * 24
+        s2_df    = pd.DataFrame(s2_rows)[S2_FEATURES]
+        s2_preds = np.clip(s2_model.predict(s2_df), 0, None)           # (n,)
 
-        forecast: list[float] = [current_pm25]  # t=0
+        for i, station in enumerate(STATION_NAMES):
+            fp = round(float(s2_preds[i]), 2)
+            forecasts[station].append(fp)
+            state[station]["hist"].append(fp)
 
-        for h in range(1, 169):
-            dt_h = now + timedelta(hours=h)
-            X = build_feature_row(
-                dt_h, station, meteo, air,
-                pm25_hist, o3_hist, no2_hist, wind_hist, temp_hist,
-            )
-
-            if model is not None:
-                pred = float(model.predict(X)[0])
-            else:
-                # Dummy: variación sinusoidal + ruido
-                noise = rng.normal(0, 1.2)
-                diurnal = 4 * np.sin(2 * np.pi * dt_h.hour / 24 - np.pi / 2)
-                pred = max(0.0, pm25_hist[-1] * 0.97 + diurnal + noise)
-
-            pred = max(0.0, round(pred, 2))
-            forecast.append(pred)
-
-            # Actualizar historiales
-            pm25_hist.append(pred)
-            o3_hist.append(air.get("O3", 35.0) * rng.uniform(0.97, 1.03))
-            no2_hist.append(air.get("NO2", 25.0) * rng.uniform(0.97, 1.03))
-            wind_hist.append(meteo["Velocidad_viento"] * rng.uniform(0.95, 1.05))
-            temp_hist.append(meteo["Temperatura"] + rng.normal(0, 0.5))
-
-        results[station] = forecast
-
-    return results
+    return forecasts
 
 
 # ── Utilidades de UI ─────────────────────────────────────────────────────────
@@ -505,6 +572,11 @@ def build_forecast_chart(forecasts: dict, station: str) -> go.Figure:
 # ── App principal ─────────────────────────────────────────────────────────────
 
 def main():
+    from streamlit_autorefresh import st_autorefresh
+
+    # ── Auto-refresh: el visualizador emite un evento cada CHECK_INTERVAL_MINUTES ──
+    st_autorefresh(interval=CHECK_INTERVAL_MINUTES * 60 * 1000, key="data_refresh")
+
     # ── Header ──
     st.markdown("""
     <h1 style="font-size:1.6rem;margin-bottom:0;color:#e6edf3">
@@ -515,19 +587,35 @@ def main():
     </p>
     """, unsafe_allow_html=True)
 
-    # ── Carga datos (con spinner) ──
-    if "forecasts" not in st.session_state:
-        with st.spinner("⏳ Cargando datos y generando previsión 168h…"):
-            model   = load_model()
-            today   = datetime.now().strftime("%Y-%m-%d")
-            air_data = fetch_air_quality()
-            meteo    = fetch_meteo(today)
-            forecasts = predict_recursive_168h(model, air_data, meteo)
+    # ── Carga datos con caché CSV inteligente ──
+    first_load = "forecasts" not in st.session_state
 
-            st.session_state["forecasts"]  = forecasts
-            st.session_state["air_data"]   = air_data
-            st.session_state["meteo"]      = meteo
-            st.session_state["loaded_at"]  = datetime.now()
+    if first_load:
+        with st.spinner("⏳ Cargando modelos y generando previsión 168h…"):
+            air_data, meteo, _ = get_current_data()
+            s1_model, scaler, s2_model = load_cbla_models()
+            forecasts = predict_cbla_168h(s1_model, s2_model, scaler, air_data, meteo)
+            st.session_state.update({
+                "forecasts": forecasts,
+                "air_data": air_data,
+                "meteo": meteo,
+                "loaded_at": datetime.now(),
+                "data_source": "fresh",
+            })
+    else:
+        # Comprobación periódica: descarga solo si ha transcurrido el intervalo mínimo
+        air_data, meteo, refreshed = get_current_data()
+        if refreshed:
+            with st.spinner("⏳ Nuevos datos disponibles · Actualizando previsión…"):
+                s1_model, scaler, s2_model = load_cbla_models()
+                forecasts = predict_cbla_168h(s1_model, s2_model, scaler, air_data, meteo)
+                st.session_state.update({
+                    "forecasts": forecasts,
+                    "air_data": air_data,
+                    "meteo": meteo,
+                    "loaded_at": datetime.now(),
+                    "data_source": "fresh",
+                })
 
     forecasts = st.session_state["forecasts"]
     air_data  = st.session_state["air_data"]
@@ -559,13 +647,23 @@ def main():
         cols[1].metric("🔵 Presión", f"{meteo['Presion']:.0f} hPa")
 
         st.markdown("---")
-        if st.button("🔄 Actualizar datos"):
-            for key in ["forecasts", "air_data", "meteo", "loaded_at"]:
+        if st.button("🔄 Forzar actualización"):
+            for key in ["forecasts", "air_data", "meteo", "loaded_at", "data_source"]:
                 st.session_state.pop(key, None)
-            st.cache_data.clear()
             st.rerun()
 
-        st.caption(f"Datos cargados: {loaded_at.strftime('%H:%M:%S')}")
+        last_dl = _get_last_download_time()
+        if last_dl:
+            elapsed_min = int((datetime.now() - last_dl).total_seconds() / 60)
+            next_dl_min = max(0, MIN_DOWNLOAD_INTERVAL_MINUTES - elapsed_min)
+            source_icon = "🆕" if st.session_state.get("data_source") == "fresh" else "💾"
+            st.caption(
+                f"{source_icon} Descargado: {last_dl.strftime('%H:%M:%S')}\n\n"
+                f"Próxima descarga en: {next_dl_min} min\n\n"
+                f"Revisión automática cada: {CHECK_INTERVAL_MINUTES} min"
+            )
+        else:
+            st.caption(f"Datos cargados: {loaded_at.strftime('%H:%M:%S')}")
 
     # ── Layout principal ──
     col_map, col_right = st.columns([3, 2], gap="medium")
