@@ -6,6 +6,8 @@ Dashboard Streamlit con modelo LightGBM, scraping en tiempo real y previsión 16
 import warnings
 warnings.filterwarnings("ignore")
 
+import os
+from dotenv import load_dotenv
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,6 +19,13 @@ from bs4 import BeautifulSoup
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import re
+
+load_dotenv()
+
+CHECK_INTERVAL_MINUTES     = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
+MIN_DOWNLOAD_INTERVAL_MINUTES = int(os.getenv("MIN_DOWNLOAD_INTERVAL_MINUTES", "60"))
+AQ_CACHE_FILE    = "cache_air_quality.csv"
+METEO_CACHE_FILE = "cache_meteo.csv"
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -96,7 +105,6 @@ MODEL_FEATURES = [
 
 # ── Scraping ─────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_air_quality() -> dict[str, dict]:
     """Extrae O3, NO2 y PM25 de la red RVVCCA para cada estación."""
     url = "https://rvvcca.pica.gva.es/Castellano/Noticias/ultimas_medidas.asp"
@@ -155,7 +163,6 @@ def fetch_air_quality() -> dict[str, dict]:
     return data
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_meteo(date_str: str) -> dict:
     """Obtiene datos meteorológicos de Meteostat para Valencia (08284)."""
     fallback = {
@@ -191,6 +198,74 @@ def fetch_meteo(date_str: str) -> dict:
         return {**fallback, **meteo}
     except Exception:
         return fallback
+
+
+# ── Caché CSV ────────────────────────────────────────────────────────────────
+
+def _get_last_download_time() -> datetime | None:
+    if not os.path.exists(AQ_CACHE_FILE):
+        return None
+    try:
+        df = pd.read_csv(AQ_CACHE_FILE, nrows=1)
+        if df.empty or "downloaded_at" not in df.columns:
+            return None
+        return datetime.fromisoformat(df["downloaded_at"].iloc[0])
+    except Exception:
+        return None
+
+
+def _save_air_quality_cache(air_data: dict, ts: datetime) -> None:
+    rows = [{"downloaded_at": ts.isoformat(), "station": s, **v} for s, v in air_data.items()]
+    pd.DataFrame(rows).to_csv(AQ_CACHE_FILE, index=False)
+
+
+def _save_meteo_cache(meteo: dict, ts: datetime) -> None:
+    pd.DataFrame([{"downloaded_at": ts.isoformat(), **meteo}]).to_csv(METEO_CACHE_FILE, index=False)
+
+
+def _load_air_quality_cache() -> dict:
+    df = pd.read_csv(AQ_CACHE_FILE)
+    return {
+        row["station"]: {"O3": row["O3"], "NO2": row["NO2"], "PM25": row["PM25"]}
+        for _, row in df.iterrows()
+    }
+
+
+def _load_meteo_cache() -> dict:
+    df = pd.read_csv(METEO_CACHE_FILE)
+    row = df.iloc[0].to_dict()
+    row.pop("downloaded_at", None)
+    return row
+
+
+def get_current_data(force: bool = False) -> tuple[dict, dict, bool]:
+    """Devuelve (air_data, meteo, was_refreshed). Descarga solo si ha transcurrido MIN_DOWNLOAD_INTERVAL_MINUTES."""
+    if st.session_state.get("_is_downloading"):
+        last = _get_last_download_time()
+        if last is not None:
+            return _load_air_quality_cache(), _load_meteo_cache(), False
+
+    last = _get_last_download_time()
+    now = datetime.now()
+    elapsed_min = (now - last).total_seconds() / 60 if last else float("inf")
+    should_download = force or elapsed_min >= MIN_DOWNLOAD_INTERVAL_MINUTES
+
+    if not should_download:
+        return _load_air_quality_cache(), _load_meteo_cache(), False
+
+    st.session_state["_is_downloading"] = True
+    try:
+        air_data = fetch_air_quality()
+        meteo = fetch_meteo(now.strftime("%Y-%m-%d"))
+        _save_air_quality_cache(air_data, now)
+        _save_meteo_cache(meteo, now)
+        return air_data, meteo, True
+    except Exception:
+        if last is not None:
+            return _load_air_quality_cache(), _load_meteo_cache(), False
+        raise
+    finally:
+        st.session_state["_is_downloading"] = False
 
 
 # ── Modelo ───────────────────────────────────────────────────────────────────
@@ -505,6 +580,11 @@ def build_forecast_chart(forecasts: dict, station: str) -> go.Figure:
 # ── App principal ─────────────────────────────────────────────────────────────
 
 def main():
+    from streamlit_autorefresh import st_autorefresh
+
+    # ── Auto-refresh: el visualizador emite un evento cada CHECK_INTERVAL_MINUTES ──
+    st_autorefresh(interval=CHECK_INTERVAL_MINUTES * 60 * 1000, key="data_refresh")
+
     # ── Header ──
     st.markdown("""
     <h1 style="font-size:1.6rem;margin-bottom:0;color:#e6edf3">
@@ -515,19 +595,35 @@ def main():
     </p>
     """, unsafe_allow_html=True)
 
-    # ── Carga datos (con spinner) ──
-    if "forecasts" not in st.session_state:
-        with st.spinner("⏳ Cargando datos y generando previsión 168h…"):
-            model   = load_model()
-            today   = datetime.now().strftime("%Y-%m-%d")
-            air_data = fetch_air_quality()
-            meteo    = fetch_meteo(today)
-            forecasts = predict_recursive_168h(model, air_data, meteo)
+    # ── Carga datos con caché CSV inteligente ──
+    first_load = "forecasts" not in st.session_state
 
-            st.session_state["forecasts"]  = forecasts
-            st.session_state["air_data"]   = air_data
-            st.session_state["meteo"]      = meteo
-            st.session_state["loaded_at"]  = datetime.now()
+    if first_load:
+        with st.spinner("⏳ Cargando datos y generando previsión 168h…"):
+            air_data, meteo, _ = get_current_data()
+            model = load_model()
+            forecasts = predict_recursive_168h(model, air_data, meteo)
+            st.session_state.update({
+                "forecasts": forecasts,
+                "air_data": air_data,
+                "meteo": meteo,
+                "loaded_at": datetime.now(),
+                "data_source": "fresh",
+            })
+    else:
+        # Comprobación periódica: descarga solo si ha transcurrido el intervalo mínimo
+        air_data, meteo, refreshed = get_current_data()
+        if refreshed:
+            with st.spinner("⏳ Nuevos datos disponibles · Actualizando previsión…"):
+                model = load_model()
+                forecasts = predict_recursive_168h(model, air_data, meteo)
+                st.session_state.update({
+                    "forecasts": forecasts,
+                    "air_data": air_data,
+                    "meteo": meteo,
+                    "loaded_at": datetime.now(),
+                    "data_source": "fresh",
+                })
 
     forecasts = st.session_state["forecasts"]
     air_data  = st.session_state["air_data"]
@@ -559,13 +655,23 @@ def main():
         cols[1].metric("🔵 Presión", f"{meteo['Presion']:.0f} hPa")
 
         st.markdown("---")
-        if st.button("🔄 Actualizar datos"):
-            for key in ["forecasts", "air_data", "meteo", "loaded_at"]:
+        if st.button("🔄 Forzar actualización"):
+            for key in ["forecasts", "air_data", "meteo", "loaded_at", "data_source"]:
                 st.session_state.pop(key, None)
-            st.cache_data.clear()
             st.rerun()
 
-        st.caption(f"Datos cargados: {loaded_at.strftime('%H:%M:%S')}")
+        last_dl = _get_last_download_time()
+        if last_dl:
+            elapsed_min = int((datetime.now() - last_dl).total_seconds() / 60)
+            next_dl_min = max(0, MIN_DOWNLOAD_INTERVAL_MINUTES - elapsed_min)
+            source_icon = "🆕" if st.session_state.get("data_source") == "fresh" else "💾"
+            st.caption(
+                f"{source_icon} Descargado: {last_dl.strftime('%H:%M:%S')}\n\n"
+                f"Próxima descarga en: {next_dl_min} min\n\n"
+                f"Revisión automática cada: {CHECK_INTERVAL_MINUTES} min"
+            )
+        else:
+            st.caption(f"Datos cargados: {loaded_at.strftime('%H:%M:%S')}")
 
     # ── Layout principal ──
     col_map, col_right = st.columns([3, 2], gap="medium")
