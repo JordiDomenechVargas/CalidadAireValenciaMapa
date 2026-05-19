@@ -19,8 +19,17 @@ from bs4 import BeautifulSoup
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import re
+import unicodedata
 
 load_dotenv()
+
+
+def _normalize(s: str) -> str:
+    """Quita acentos/diacríticos y pasa a minúsculas para emparejar nombres robustamente."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s)
+        if unicodedata.category(c) != "Mn"
+    ).lower()
 
 CHECK_INTERVAL_MINUTES        = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
 MIN_DOWNLOAD_INTERVAL_MINUTES = int(os.getenv("MIN_DOWNLOAD_INTERVAL_MINUTES", "60"))
@@ -52,43 +61,85 @@ html, body, [class*="css"] {
 }
 h1, h2, h3 { font-family: 'Space Mono', monospace; }
 
-.stApp { background: #0d1117; color: #e6edf3; }
+.stApp { background: #f6f8fa; color: #1f2328; }
 
 .metric-card {
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #d0d7de;
     border-radius: 8px;
     padding: 16px 20px;
     margin-bottom: 8px;
+    box-shadow: 0 1px 3px rgba(31,35,40,0.06);
 }
-.metric-card .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+.metric-card .label { font-size: 11px; color: #57606a; text-transform: uppercase; letter-spacing: 1px; }
 .metric-card .value { font-size: 28px; font-family: 'Space Mono', monospace; font-weight: 700; }
 
-.aqi-good    { color: #3fb950; }
-.aqi-moderate{ color: #d29922; }
-.aqi-usg     { color: #f0883e; }
-.aqi-unhealthy{ color: #da3633; }
+.aqi-1 { color: #00CCCC; }  /* Buena */
+.aqi-2 { color: #2E9D5B; }  /* Razonablemente buena */
+.aqi-3 { color: #D4A017; }  /* Regular */
+.aqi-4 { color: #E64A19; }  /* Desfavorable */
+.aqi-5 { color: #960018; }  /* Muy desfavorable */
+.aqi-6 { color: #7D2181; }  /* Extremadamente desfavorable */
 
 section[data-testid="stSidebar"] {
-    background: #161b22;
-    border-right: 1px solid #30363d;
+    background: #ffffff;
+    border-right: 1px solid #d0d7de;
+}
+
+/* Ocultar sólo el botón Deploy de Streamlit (sin tocar el control del sidebar) */
+div[data-testid="stDeployButton"] { display: none !important; }
+[data-testid="stToolbarActions"] { display: none !important; }
+
+/* Badge "Valencia" en la esquina superior derecha */
+.valencia-badge {
+    position: fixed;
+    top: 12px;
+    right: 18px;
+    z-index: 999999;
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: #1f2328;
+    background: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 6px 12px;
+    box-shadow: 0 1px 3px rgba(31,35,40,0.08);
 }
 </style>
+<div class="valencia-badge">📍 Valencia</div>
 """, unsafe_allow_html=True)
 
 # ── Constantes / Estaciones ──────────────────────────────────────────────────
+# Coordenadas y nombres oficiales RVVCCA (Generalitat Valenciana):
+# https://rvvcca.pica.gva.es/es/ultimos-datos
 STATIONS = {
-    "Valencia Port-Moll":       (39.445, -0.330),
-    "Pista de Silla":           (39.458, -0.376),
-    "Vivers":                   (39.479, -0.368),
-    "Politècnic":               (39.481, -0.347),
-    "Av. França":               (39.458, -0.354),
-    "Molí del Sol":             (39.484, -0.402),
-    "Conselleria Meteo":        (39.481, -0.392),
-    "Bulevard Sud":             (39.450, -0.392),
-    "Valencia Centre":          (39.471, -0.377),
-    "Port Llit Antic Túria":    (39.458, -0.332),
-    "Natzaret Met-2":           (39.444, -0.334),
+    "Port Moll Trans. Ponent":  (39.45926486, -0.32321741),
+    "Pista de Silla":           (39.45806013, -0.37665323),
+    "Vivers":                   (39.47948825, -0.36955032),
+    "Politècnic":               (39.47962193, -0.33740740),
+    "Av. França":               (39.45750439, -0.34268990),
+    "Molí del Sol":             (39.48113875, -0.40855865),
+    "Bulevard Sud":             (39.45037852, -0.39631399),
+    "Centre":                   (39.47071883, -0.37648469),
+    "Olivereta":                (39.46923859, -0.40603766),
+    "Port llit antic Túria":    (39.45051894, -0.32894501),
+}
+
+# Substring distintivo (normalizado, sin acentos) que debe aparecer en la
+# fila de la tabla scrapeada para emparejar con cada estación. Evita colisiones
+# entre estaciones que empiezan por la misma palabra (ej. "Port Moll" vs "Port llit").
+STATION_MATCH_KEYS = {
+    "Port Moll Trans. Ponent":  "port moll",
+    "Pista de Silla":           "pista",
+    "Vivers":                   "vivers",
+    "Politècnic":               "politecnic",
+    "Av. França":               "franca",
+    "Molí del Sol":             "moli",
+    "Bulevard Sud":             "bulevard",
+    "Centre":                   "centre",
+    "Olivereta":                "olivereta",
+    "Port llit antic Túria":    "turia",
 }
 
 STATION_NAMES = list(STATIONS.keys())
@@ -135,11 +186,12 @@ def fetch_air_quality() -> dict[str, dict]:
                 if not cells:
                     continue
                 station_raw = cells[0] if cells else ""
-                # Buscar coincidencia parcial con nuestras estaciones
+                # Buscar coincidencia parcial con nuestras estaciones usando
+                # substrings distintivos normalizados (sin acentos, en minúsculas).
+                station_raw_norm = _normalize(station_raw)
                 matched = None
-                for name in STATION_NAMES:
-                    key = name.split()[0].lower()
-                    if key in station_raw.lower():
+                for name, key in STATION_MATCH_KEYS.items():
+                    if key in station_raw_norm:
                         matched = name
                         break
                 if matched:
@@ -429,18 +481,36 @@ def predict_cbla_168h(s1_model, s2_model, scaler, air_data: dict, meteo: dict) -
 
 # ── Utilidades de UI ─────────────────────────────────────────────────────────
 
+# Categorías oficiales de calidad del aire para PM2.5 (µg/m³).
+# Cada tupla: (umbral_superior_exclusivo, etiqueta, color hex, clase CSS).
+PM25_LEVELS = [
+    (11,    "Buena",                       "#00CCCC", "aqi-1"),
+    (21,    "Razonablemente buena",        "#2E9D5B", "aqi-2"),
+    (26,    "Regular",                     "#D4A017", "aqi-3"),
+    (51,    "Desfavorable",                "#E64A19", "aqi-4"),
+    (76,    "Muy desfavorable",            "#960018", "aqi-5"),
+    (10000, "Extremadamente desfavorable", "#7D2181", "aqi-6"),
+]
+
+
+def _pm25_bucket(val: float) -> tuple[str, str, str]:
+    """Devuelve (etiqueta, color, clase CSS) según el nivel PM2.5."""
+    for _thr, label, color, cls in PM25_LEVELS:
+        if val < _thr:
+            return label, color, cls
+    return PM25_LEVELS[-1][1], PM25_LEVELS[-1][2], PM25_LEVELS[-1][3]
+
+
 def pm25_color(val: float) -> str:
-    if val < 12:   return "#3fb950"   # verde
-    if val < 35:   return "#d29922"   # amarillo
-    if val < 55:   return "#f0883e"   # naranja
-    return "#da3633"                   # rojo
+    return _pm25_bucket(val)[1]
 
 
 def pm25_label(val: float) -> str:
-    if val < 12:  return "Buena"
-    if val < 35:  return "Moderada"
-    if val < 55:  return "Dañina sensibles"
-    return "Dañina"
+    return _pm25_bucket(val)[0]
+
+
+def pm25_class(val: float) -> str:
+    return _pm25_bucket(val)[2]
 
 
 def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Map:
@@ -465,14 +535,15 @@ def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Ma
         border_w = 3 if is_selected else 1.5
 
         popup_html = f"""
-        <div style="font-family:'DM Sans',sans-serif;min-width:200px;background:#161b22;
-                    color:#e6edf3;padding:12px;border-radius:8px;border:1px solid #30363d;">
+        <div style="font-family:'DM Sans',sans-serif;min-width:200px;background:#ffffff;
+                    color:#1f2328;padding:12px;border-radius:8px;border:1px solid #d0d7de;
+                    box-shadow:0 2px 8px rgba(31,35,40,0.12);">
           <b style="font-family:'Space Mono',monospace;font-size:13px">{name}</b><br>
-          <hr style="border-color:#30363d;margin:6px 0">
-          <span style="font-size:11px;color:#8b949e">AHORA (t=0)</span><br>
+          <hr style="border-color:#d0d7de;margin:6px 0">
+          <span style="font-size:11px;color:#57606a">AHORA (t=0)</span><br>
           <span style="font-size:22px;font-weight:700;color:{pm25_color(current)}">{current:.1f} µg/m³</span>
           <br><br>
-          <span style="font-size:11px;color:#8b949e">PREVISIÓN · {dt_label}</span><br>
+          <span style="font-size:11px;color:#57606a">PREVISIÓN · {dt_label}</span><br>
           <span style="font-size:22px;font-weight:700;color:{color}">{predicted:.1f} µg/m³</span>
           <br>
           <span style="font-size:11px;color:{color};background:rgba(255,255,255,0.05);
@@ -489,7 +560,7 @@ def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Ma
             fill_color=color,
             fill_opacity=0.9,
             popup=folium.Popup(popup_html, max_width=240),
-            tooltip=f"{name}: {val:.1f} µg/m³",
+            tooltip=name,
         ).add_to(m)
 
     # Leyenda
@@ -499,10 +570,12 @@ def build_map(forecasts: dict, hour_idx: int, selected: str | None) -> folium.Ma
                 padding:12px 16px;font-family:'DM Sans',sans-serif;color:#333;font-size:12px;
                 box-shadow:0 2px 8px rgba(0,0,0,0.15);">
       <b style="font-family:'Space Mono',monospace">PM2.5 µg/m³</b><br>
-      <span style="color:#3fb950">●</span> &lt;12 · Buena<br>
-      <span style="color:#d29922">●</span> 12–35 · Moderada<br>
-      <span style="color:#f0883e">●</span> 35–55 · Dañina sensibles<br>
-      <span style="color:#da3633">●</span> &gt;55 · Dañina
+      <span style="color:#00CCCC">●</span> 0–10 · Buena<br>
+      <span style="color:#2E9D5B">●</span> 11–20 · Razonablemente buena<br>
+      <span style="color:#D4A017">●</span> 21–25 · Regular<br>
+      <span style="color:#E64A19">●</span> 26–50 · Desfavorable<br>
+      <span style="color:#960018">●</span> 51–75 · Muy desfavorable<br>
+      <span style="color:#7D2181">●</span> &ge;76 · Extremadamente desfavorable
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))
@@ -520,10 +593,12 @@ def build_forecast_chart(forecasts: dict, station: str) -> go.Figure:
     # Áreas AQI
     x_full = [times[0], times[-1]]
     for ymin, ymax, color, label in [
-        (0, 12,  "rgba(63,185,80,0.08)",  "Buena"),
-        (12, 35, "rgba(210,153,34,0.08)", "Moderada"),
-        (35, 55, "rgba(240,136,62,0.08)", "Dañina sensibles"),
-        (55, 200,"rgba(218,54,51,0.08)",  "Dañina"),
+        (0,  11,  "rgba(0,204,204,0.10)",   "Buena"),
+        (11, 21,  "rgba(46,157,91,0.10)",   "Razonablemente buena"),
+        (21, 26,  "rgba(212,160,23,0.10)",  "Regular"),
+        (26, 51,  "rgba(230,74,25,0.10)",   "Desfavorable"),
+        (51, 76,  "rgba(150,0,24,0.10)",    "Muy desfavorable"),
+        (76, 800, "rgba(125,33,129,0.10)",  "Extremadamente desfavorable"),
     ]:
         fig.add_hrect(y0=ymin, y1=ymax, fillcolor=color, line_width=0,
                       annotation_text=label, annotation_position="left",
@@ -541,29 +616,29 @@ def build_forecast_chart(forecasts: dict, station: str) -> go.Figure:
     ))
 
     # Marcador t=0
-    fig.add_vline(x=times[0], line_dash="dash", line_color="#8b949e", line_width=1)
+    fig.add_vline(x=times[0], line_dash="dash", line_color="#57606a", line_width=1)
     fig.add_annotation(x=times[0], y=max(fc)*0.9, text="Ahora",
-                       showarrow=False, font=dict(color="#8b949e", size=11))
+                       showarrow=False, font=dict(color="#57606a", size=11))
 
     fig.update_layout(
         title=dict(
             text=f"<b>{station}</b> · Previsión PM2.5 168h",
-            font=dict(family="Space Mono", size=14, color="#e6edf3"),
+            font=dict(family="Space Mono", size=14, color="#1f2328"),
         ),
-        paper_bgcolor="#161b22",
-        plot_bgcolor="#161b22",
-        font=dict(family="DM Sans", color="#8b949e"),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#f6f8fa",
+        font=dict(family="DM Sans", color="#57606a"),
         xaxis=dict(
-            showgrid=True, gridcolor="#21262d", tickformat="%a %d\n%H:%M",
-            color="#8b949e", title=None,
+            showgrid=True, gridcolor="#eaecef", tickformat="%a %d\n%H:%M",
+            color="#57606a", title=None,
         ),
         yaxis=dict(
-            showgrid=True, gridcolor="#21262d", title="µg/m³",
-            color="#8b949e", range=[0, max(max(fc)*1.15, 60)],
+            showgrid=True, gridcolor="#eaecef", title="µg/m³",
+            color="#57606a", range=[0, max(max(fc)*1.15, 60)],
         ),
         margin=dict(l=50, r=20, t=50, b=40),
         height=320,
-        legend=dict(bgcolor="#161b22", bordercolor="#30363d"),
+        legend=dict(bgcolor="#ffffff", bordercolor="#d0d7de"),
         hovermode="x unified",
     )
     return fig
@@ -579,10 +654,10 @@ def main():
 
     # ── Header ──
     st.markdown("""
-    <h1 style="font-size:1.6rem;margin-bottom:0;color:#e6edf3">
+    <h1 style="font-size:1.6rem;margin-bottom:0;color:#1f2328">
       🌿 Calidad del Aire · Valencia
     </h1>
-    <p style="color:#8b949e;font-size:0.85rem;margin-top:4px;font-family:'DM Sans',sans-serif">
+    <p style="color:#57606a;font-size:0.85rem;margin-top:4px;font-family:'DM Sans',sans-serif">
       PM2.5 en tiempo real + previsión LightGBM · 168 horas
     </p>
     """, unsafe_allow_html=True)
@@ -622,21 +697,41 @@ def main():
     meteo     = st.session_state["meteo"]
     loaded_at = st.session_state.get("loaded_at", datetime.now())
 
+    if "selected_station" not in st.session_state:
+        st.session_state.selected_station = "Av. França"
+
     # ── Sidebar ──
     with st.sidebar:
         st.markdown("### ⚙️ Controles")
 
-        hour_idx = st.slider(
-            "Hora de previsión (h)",
-            min_value=0, max_value=168, value=0, step=1,
-            help="0 = datos actuales · 168 = +7 días",
+        from datetime import date
+        today = date.today()
+        selected_date = st.date_input(
+            "📅 Día de previsión",
+            value=today,
+            min_value=today,
+            max_value=today + timedelta(days=7),
+            help="Elige cualquier día desde hoy hasta dentro de 7 días",
         )
 
-        dt_sel = datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_idx)
-        st.caption(f"📅 {dt_sel.strftime('%A %d/%m/%Y · %H:%M')}")
+        now_hour = datetime.now().replace(minute=0, second=0, microsecond=0)
+        if selected_date == today:
+            hour_idx = 0
+            dt_sel = now_hour
+        else:
+            days_ahead = (selected_date - today).days
+            hour_idx = min(days_ahead * 24 + 12, 168)
+            dt_sel = now_hour + timedelta(hours=hour_idx)
+
+        st.caption(f"⏱ Previsión para: {dt_sel.strftime('%A %d/%m/%Y · %H:%M')}")
 
         st.markdown("---")
-        selected_station = st.selectbox("📍 Estación", STATION_NAMES, index=8)
+        selected_station = st.selectbox(
+            "📍 Estación",
+            STATION_NAMES,
+            index=STATION_NAMES.index(st.session_state.selected_station),
+        )
+        st.session_state.selected_station = selected_station
 
         st.markdown("---")
         st.markdown("### 🌤 Meteorología")
@@ -648,6 +743,9 @@ def main():
 
         st.markdown("---")
         if st.button("🔄 Forzar actualización"):
+            for cache_file in (AQ_CACHE_FILE, METEO_CACHE_FILE):
+                if os.path.exists(cache_file):
+                    os.remove(cache_file)
             for key in ["forecasts", "air_data", "meteo", "loaded_at", "data_source"]:
                 st.session_state.pop(key, None)
             st.rerun()
@@ -671,7 +769,17 @@ def main():
     with col_map:
         st.markdown(f"#### 🗺 Mapa · {'+' + str(hour_idx) + 'h' if hour_idx else 'Ahora'}")
         m = build_map(forecasts, hour_idx, selected_station)
-        st_folium(m, width=None, height=500, returned_objects=[])
+        map_state = st_folium(
+            m,
+            width=None,
+            height=500,
+            returned_objects=["last_object_clicked_tooltip"],
+            key="folium_map",
+        )
+        clicked = map_state.get("last_object_clicked_tooltip") if map_state else None
+        if clicked and clicked in STATIONS and clicked != st.session_state.selected_station:
+            st.session_state.selected_station = clicked
+            st.rerun()
 
     with col_right:
         # Métricas de la estación seleccionada
@@ -679,20 +787,20 @@ def main():
         val_now  = fc_sel[0]
         val_pred = fc_sel[hour_idx]
         delta    = val_pred - val_now
-        cat_color = "aqi-good" if val_pred < 12 else "aqi-moderate" if val_pred < 35 else "aqi-usg" if val_pred < 55 else "aqi-unhealthy"
+        cat_color = pm25_class(val_pred)
 
         st.markdown(f"#### 📍 {selected_station}")
         st.markdown(f"""
         <div class="metric-card">
           <div class="label">PM2.5 ahora (t=0)</div>
-          <div class="value {('aqi-good' if val_now < 12 else 'aqi-moderate' if val_now < 35 else 'aqi-usg' if val_now < 55 else 'aqi-unhealthy')}">{val_now:.1f} µg/m³</div>
+          <div class="value {pm25_class(val_now)}">{val_now:.1f} µg/m³</div>
         </div>
         <div class="metric-card">
           <div class="label">PM2.5 previsto (+{hour_idx}h)</div>
           <div class="value {cat_color}">{val_pred:.1f} µg/m³
-            <span style="font-size:14px;color:#8b949e"> ({'+' if delta >= 0 else ''}{delta:.1f})</span>
+            <span style="font-size:14px;color:#57606a"> ({'+' if delta >= 0 else ''}{delta:.1f})</span>
           </div>
-          <div style="font-size:12px;color:#8b949e;margin-top:4px">{pm25_label(val_pred)}</div>
+          <div style="font-size:12px;color:#57606a;margin-top:4px">{pm25_label(val_pred)}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -701,12 +809,12 @@ def main():
         <div class="metric-card" style="margin-top:8px">
           <div class="label">Contaminantes actuales</div>
           <div style="display:flex;gap:16px;margin-top:8px">
-            <div><div style="font-size:10px;color:#8b949e">O₃</div>
-                 <div style="font-size:18px;font-family:'Space Mono',monospace">{air.get('O3', 0):.1f}</div></div>
-            <div><div style="font-size:10px;color:#8b949e">NO₂</div>
-                 <div style="font-size:18px;font-family:'Space Mono',monospace">{air.get('NO2', 0):.1f}</div></div>
-            <div><div style="font-size:10px;color:#8b949e">PM2.5</div>
-                 <div style="font-size:18px;font-family:'Space Mono',monospace">{air.get('PM25', val_now):.1f}</div></div>
+            <div><div style="font-size:10px;color:#57606a">O₃</div>
+                 <div style="font-size:18px;font-family:'Space Mono',monospace;color:#1f2328">{air.get('O3', 0):.1f}</div></div>
+            <div><div style="font-size:10px;color:#57606a">NO₂</div>
+                 <div style="font-size:18px;font-family:'Space Mono',monospace;color:#1f2328">{air.get('NO2', 0):.1f}</div></div>
+            <div><div style="font-size:10px;color:#57606a">PM2.5</div>
+                 <div style="font-size:18px;font-family:'Space Mono',monospace;color:#1f2328">{air.get('PM25', val_now):.1f}</div></div>
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -734,8 +842,8 @@ def main():
 
     # ── Footer ──
     st.markdown("""
-    <hr style="border-color:#30363d;margin-top:32px">
-    <p style="text-align:center;font-size:11px;color:#8b949e;font-family:'DM Sans',sans-serif">
+    <hr style="border-color:#d0d7de;margin-top:32px">
+    <p style="text-align:center;font-size:11px;color:#57606a;font-family:'DM Sans',sans-serif">
       Datos: RVVCCA GVA · Meteostat · Modelo LightGBM entrenado localmente
     </p>
     """, unsafe_allow_html=True)
