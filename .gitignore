@@ -9,3 +9,8 @@ cache_meteo.csv
 *.keras
 xgb_meta_model_h1.json
 CBLA.ipynb
+
+# Backend / frontend
+backend/models/
+backend/.env
+frontend/.env
