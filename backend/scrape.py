@@ -1,17 +1,29 @@
-"""Scraping de calidad del aire (RVVCCA) y meteorología (Meteostat)."""
+"""Scraping de calidad del aire (RVVCCA Pentaho JSON) y meteorología (Meteostat)."""
 import re
+import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import numpy as np
 import requests
 from bs4 import BeautifulSoup
 
-from .stations import STATION_NAMES, match_station
+from .stations import STATION_CODES, STATION_NAMES
 
 logger = logging.getLogger(__name__)
 
-_RVVCCA_URL = "https://rvvcca.pica.gva.es/Castellano/Noticias/ultimas_medidas.asp"
+# Endpoint JSON de la RVVCCA — devuelve mediciones horarias del intervalo [start, finish].
+# Se descubrió desde /es/getmeasurementsbystation/{drupal_id} (página "Histórico de mediciones").
+_RVVCCA_JSON_TPL = (
+    "https://rvvcca.pica.gva.es/downloadformat/hourly/cda/json?file="
+    "https://bi.pica.gva.es/pentaho/plugin/cda/api/doQuery?_TRUST_USER_=opendata_gva"
+    "&path=/public/gva/verticals/sql/hourlyAverage.cda"
+    "&dataAccessId=HourlyAverage"
+    "&paramstart={start}%2000%3A00%3A00"
+    "&paramfinish={finish}%2023%3A59%3A59"
+    "&paramidStation={code}"
+)
+
 _METEO_URL_TPL = "https://meteostat.net/es/station/08284?t={date}/{date}"
 
 _AIR_FALLBACK = {"O3": 35.0, "NO2": 25.0, "PM25": 15.0}
@@ -25,55 +37,83 @@ _METEO_FALLBACK = {
 }
 
 
+_HTTP_RETRIES = 3
+_HTTP_BACKOFF_S = 1.5
+_MAX_PARALLEL = 2   # El backend Pentaho devuelve 500 si recibe muchas peticiones simultáneas
+
+
+def _fetch_station_latest(name: str, code: str) -> tuple[str, dict | None]:
+    """Devuelve (nombre, dict con las últimas mediciones no nulas) o (nombre, None).
+
+    Reintenta hasta `_HTTP_RETRIES` veces con backoff exponencial si el endpoint
+    responde 500 (Pentaho a veces se satura) o hay un timeout transitorio.
+    """
+    today   = datetime.now().strftime("%Y-%m-%d")
+    start   = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    url     = _RVVCCA_JSON_TPL.format(start=start, finish=today, code=code)
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+    for attempt in range(1, _HTTP_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            if resp.status_code >= 500:
+                raise requests.HTTPError(f"{resp.status_code} {resp.reason}", response=resp)
+            resp.raise_for_status()
+            rows = resp.json()
+            if not isinstance(rows, list) or not rows:
+                return name, None
+
+            # De la última hora hacia atrás, devolver la primera con alguna lectura útil.
+            for row in reversed(rows):
+                pm25 = row.get("PM2.5")
+                no2  = row.get("NO2")
+                o3   = row.get("O3")
+                if pm25 is None and no2 is None and o3 is None:
+                    continue
+                record = {}
+                if pm25 is not None: record["PM25"] = float(pm25)
+                if no2  is not None: record["NO2"]  = float(no2)
+                if o3   is not None: record["O3"]   = float(o3)
+                return name, {**_AIR_FALLBACK, **record}
+            return name, None
+        except (requests.HTTPError, requests.Timeout, requests.ConnectionError) as e:
+            if attempt < _HTTP_RETRIES:
+                wait = _HTTP_BACKOFF_S * (2 ** (attempt - 1))
+                logger.info("fetch %s (intento %d/%d) → %s · reintentando en %.1fs",
+                            name, attempt, _HTTP_RETRIES, e, wait)
+                time.sleep(wait)
+                continue
+            logger.warning("fetch %s (%s) falló tras %d intentos: %s",
+                           name, code, _HTTP_RETRIES, e)
+            return name, None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("fetch %s (%s) error inesperado: %s", name, code, e)
+            return name, None
+
+
 def fetch_air_quality() -> dict[str, dict]:
     """Extrae O3, NO2 y PM2.5 de la red RVVCCA para cada estación.
 
-    Si una estación no aparece en la tabla scrapeada, se rellena con valores
-    aleatorios pequeños alrededor de la mediana de entrenamiento (ruido).
+    Usa el endpoint JSON oficial de la GVA (`HourlyAverage.cda` via Pentaho), con
+    paralelismo limitado a 2 hilos para no saturar el backend (que devuelve 500 con
+    >3 peticiones simultáneas). Cada estación tiene reintentos con backoff.
+    Si una estación falla definitivamente, se usa el fallback fijo (no aleatorio)
+    para que las predicciones sean estables entre refrescos.
     """
-    headers = {"User-Agent": "Mozilla/5.0"}
     data: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=_MAX_PARALLEL) as pool:
+        futures = [pool.submit(_fetch_station_latest, name, code)
+                   for name, code in STATION_CODES.items()]
+        for f in as_completed(futures):
+            name, record = f.result()
+            if record is not None:
+                data[name] = record
 
-    try:
-        resp = requests.get(_RVVCCA_URL, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                if not cells:
-                    continue
-
-                matched = match_station(cells[0])
-                if not matched:
-                    continue
-
-                record: dict = {}
-                for i, cell in enumerate(cells[1:], 1):
-                    try:
-                        val = float(cell.replace(",", "."))
-                        if "O3" in cells[0].upper() or i == 1:
-                            record.setdefault("O3", val)
-                        elif "NO2" in cell.upper():
-                            record.setdefault("NO2", val)
-                        elif "PM" in cell.upper():
-                            record.setdefault("PM25", val)
-                    except ValueError:
-                        pass
-                data[matched] = {**_AIR_FALLBACK, **record}
-    except Exception as e:  # noqa: BLE001 — degradar a fallback es deliberado
-        logger.warning("fetch_air_quality failed, using fallback values: %s", e)
-
-    # Completar estaciones sin datos con un valor plausible (ruido alrededor de la mediana).
-    rng = np.random.default_rng(int(datetime.now().timestamp()) % 10000)
     for name in STATION_NAMES:
         if name not in data:
-            data[name] = {
-                "O3":   float(rng.uniform(20, 60)),
-                "NO2":  float(rng.uniform(10, 45)),
-                "PM25": float(rng.uniform(8, 30)),
-            }
+            logger.warning("Sin datos para %s — usando fallback fijo", name)
+            data[name] = _AIR_FALLBACK.copy()
+
     return data
 
 

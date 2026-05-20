@@ -7,7 +7,7 @@ __pycache__/
 cache_air_quality.csv
 cache_meteo.csv
 *.keras
-xgb_meta_model_h1.json
+xgb_meta_model*.json
 CBLA.ipynb
 
 # Backend / frontend

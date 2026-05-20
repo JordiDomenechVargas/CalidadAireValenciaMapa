@@ -27,28 +27,17 @@ STATIONS: dict[str, tuple[float, float]] = {
 
 STATION_NAMES: list[str] = list(STATIONS.keys())
 
-# Substring distintivo (normalizado, sin acentos) que debe aparecer en la fila de la
-# tabla scrapeada para emparejar con cada estación. Evita colisiones entre estaciones
-# que empiezan por la misma palabra (ej. "Port Moll" vs "Port llit").
-STATION_MATCH_KEYS: dict[str, str] = {
-    "Port Moll Trans. Ponent":  "port moll",
-    "Pista de Silla":           "pista",
-    "Vivers":                   "vivers",
-    "Politècnic":               "politecnic",
-    "Av. França":               "franca",
-    "Molí del Sol":             "moli",
-    "Bulevard Sud":             "bulevard",
-    "Centre":                   "centre",
-    "Olivereta":                "olivereta",
-    "Port llit antic Túria":    "turia",
+# Códigos públicos RVVCCA usados como `paramidStation` en el endpoint Pentaho JSON.
+# Fuente: https://rvvcca.pica.gva.es/es/ultimos-datos
+STATION_CODES: dict[str, str] = {
+    "Port Moll Trans. Ponent":  "46250301",
+    "Pista de Silla":           "46250030",
+    "Vivers":                   "46250043",
+    "Politècnic":               "46250046",
+    "Av. França":               "46250047",
+    "Molí del Sol":             "46250048",
+    "Bulevard Sud":             "46250050",
+    "Centre":                   "46250054",
+    "Olivereta":                "46250055",
+    "Port llit antic Túria":    "46250302",
 }
-
-
-def match_station(raw_name: str) -> str | None:
-    """Dado el nombre tal como aparece en la tabla scrapeada, devuelve la clave canónica
-    de STATIONS o None si no encaja con ninguna."""
-    raw_norm = normalize(raw_name)
-    for name, key in STATION_MATCH_KEYS.items():
-        if key in raw_norm:
-            return name
-    return None
