@@ -1,11 +1,11 @@
 """API FastAPI — Calidad del Aire Valencia.
 
 Endpoints:
-  GET  /health                  → estado + timestamp del snapshot
-  GET  /stations                → catálogo de centralitas
-  GET  /snapshot                → snapshot completo (estaciones + meteo + forecasts + current)
-  GET  /forecast/{station_name} → forecast 169h de una estación concreta
-  POST /refresh                 → fuerza un re-scrape + re-predict (requiere token)
+  GET  /health                       → estado + timestamp del snapshot + lista de contaminantes
+  GET  /stations                     → catálogo de centralitas
+  GET  /snapshot                     → snapshot completo
+  GET  /forecast/{pollutant}/{name}  → forecast 169h del contaminante/estación
+  POST /refresh                      → fuerza un re-scrape + re-predict (requiere token opcional)
 """
 import logging
 from contextlib import asynccontextmanager
@@ -14,7 +14,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import REFRESH_INTERVAL_MINUTES, REFRESH_TOKEN
+from .config import REFRESH_INTERVAL_MINUTES, REFRESH_TOKEN, POLLUTANTS
 from .schemas import HealthResponse, Snapshot, Station
 from .snapshot import get_snapshot, regenerate_snapshot
 from .scheduler import start_scheduler, shutdown_scheduler, get_scheduler
@@ -42,12 +42,11 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Calidad del Aire · Valencia · API",
-    description="API de predicciones PM2.5 a 168 h para la red RVVCCA de Valencia.",
-    version="1.0.0",
+    description="API multi-contaminante (PM2.5/NO2/O3) a 168 h para la red RVVCCA de Valencia.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# CORS abierto — el frontend Streamlit lo necesita y la API es pública.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,14 +58,20 @@ app.add_middleware(
 @app.get("/health", response_model=HealthResponse)
 def health():
     snap = get_snapshot()
-    last = snap.generated_at if snap else None
+    last_snap = snap.generated_at if snap else None
+    last_real = snap.last_real_data_at if snap else None
     next_in = 0
     sched = get_scheduler()
-    if sched and last is not None:
-        # Aproxima minutos restantes hasta el próximo tick del job.
-        elapsed = (datetime.now() - last).total_seconds() / 60
+    if sched and last_snap is not None:
+        elapsed = (datetime.now() - last_snap).total_seconds() / 60
         next_in = max(0, int(REFRESH_INTERVAL_MINUTES - elapsed))
-    return HealthResponse(status="ok", last_snapshot=last, next_refresh_in_min=next_in)
+    return HealthResponse(
+        status="ok",
+        last_snapshot=last_snap,
+        last_real_data_at=last_real,
+        next_refresh_in_min=next_in,
+        pollutants=list(POLLUTANTS),
+    )
 
 
 @app.get("/stations", response_model=list[Station])
@@ -82,21 +87,32 @@ def snapshot():
     return snap
 
 
-@app.get("/forecast/{station_name}", response_model=list[float])
-def forecast(station_name: str):
+@app.get("/forecast/{pollutant}/{station_name}", response_model=list[float])
+def forecast(pollutant: str, station_name: str):
     snap = get_snapshot()
     if snap is None:
         raise HTTPException(status_code=503, detail="Snapshot todavía no disponible.")
-    if station_name not in snap.forecasts:
-        raise HTTPException(status_code=404, detail=f"Estación '{station_name}' no existe.")
-    return snap.forecasts[station_name]
+    pollutant_key = pollutant.upper().replace(".", "").replace("-", "")
+    if pollutant_key not in snap.forecasts:
+        raise HTTPException(status_code=404, detail=f"Contaminante '{pollutant}' no disponible.")
+    forecasts_for_p = snap.forecasts[pollutant_key]
+    if station_name not in forecasts_for_p:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Estación '{station_name}' no soportada por el modelo de {pollutant_key}.",
+        )
+    return forecasts_for_p[station_name]
 
 
 @app.post("/refresh", response_model=HealthResponse)
 def refresh(x_refresh_token: str | None = Header(default=None, alias="X-Refresh-Token")):
-    """Fuerza un re-scrape + re-predict inmediato. Si REFRESH_TOKEN está configurado en
-    el .env, exige el header `X-Refresh-Token`."""
     if REFRESH_TOKEN and x_refresh_token != REFRESH_TOKEN:
         raise HTTPException(status_code=401, detail="Token de refresco inválido.")
     snap = regenerate_snapshot()
-    return HealthResponse(status="ok", last_snapshot=snap.generated_at, next_refresh_in_min=REFRESH_INTERVAL_MINUTES)
+    return HealthResponse(
+        status="ok",
+        last_snapshot=snap.generated_at,
+        last_real_data_at=snap.last_real_data_at,
+        next_refresh_in_min=REFRESH_INTERVAL_MINUTES,
+        pollutants=list(POLLUTANTS),
+    )

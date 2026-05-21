@@ -1,4 +1,4 @@
-"""Scraping de calidad del aire (RVVCCA Pentaho JSON) y meteorología (Meteostat)."""
+"""Scraping de calidad del aire (RVVCCA Pentaho JSON) y meteo de fallback (Meteostat)."""
 import re
 import time
 import logging
@@ -9,11 +9,11 @@ import requests
 from bs4 import BeautifulSoup
 
 from .stations import STATION_CODES, STATION_NAMES
+from .config import LOOKBACK_HOURS
 
 logger = logging.getLogger(__name__)
 
 # Endpoint JSON de la RVVCCA — devuelve mediciones horarias del intervalo [start, finish].
-# Se descubrió desde /es/getmeasurementsbystation/{drupal_id} (página "Histórico de mediciones").
 _RVVCCA_JSON_TPL = (
     "https://rvvcca.pica.gva.es/downloadformat/hourly/cda/json?file="
     "https://bi.pica.gva.es/pentaho/plugin/cda/api/doQuery?_TRUST_USER_=opendata_gva"
@@ -26,7 +26,7 @@ _RVVCCA_JSON_TPL = (
 
 _METEO_URL_TPL = "https://meteostat.net/es/station/08284?t={date}/{date}"
 
-_AIR_FALLBACK = {"O3": 35.0, "NO2": 25.0, "PM25": 15.0}
+_AIR_FALLBACK = {"O3": 35.0, "NO2": 25.0, "PM25": 15.0, "SO2": 4.0, "CO": 0.3}
 _METEO_FALLBACK = {
     "Velocidad_viento": 3.5,
     "Direccion_viento": 180.0,
@@ -36,46 +36,61 @@ _METEO_FALLBACK = {
     "Precipitacion": 0.0,
 }
 
-
 _HTTP_RETRIES = 3
 _HTTP_BACKOFF_S = 1.5
 _MAX_PARALLEL = 2   # El backend Pentaho devuelve 500 si recibe muchas peticiones simultáneas
 
 
-def _fetch_station_latest(name: str, code: str) -> tuple[str, dict | None]:
-    """Devuelve (nombre, dict con las últimas mediciones no nulas) o (nombre, None).
+def _safe_float(v) -> float | None:
+    """Convierte a float si es posible. Acepta None, string vacío y números."""
+    if v is None or v == "" or v == "null":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
-    Reintenta hasta `_HTTP_RETRIES` veces con backoff exponencial si el endpoint
-    responde 500 (Pentaho a veces se satura) o hay un timeout transitorio.
-    """
-    today   = datetime.now().strftime("%Y-%m-%d")
-    start   = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    url     = _RVVCCA_JSON_TPL.format(start=start, finish=today, code=code)
+
+def _parse_row(row: dict) -> dict | None:
+    """Normaliza una fila del JSON a {date, PM25, NO2, O3, SO2, CO}. None si no hay nada útil."""
+    pm25 = _safe_float(row.get("PM2.5"))
+    no2  = _safe_float(row.get("NO2"))
+    o3   = _safe_float(row.get("O3"))
+    so2  = _safe_float(row.get("SO2"))
+    co   = _safe_float(row.get("CO"))
+    if pm25 is None and no2 is None and o3 is None:
+        return None
+    try:
+        dt = datetime.strptime(row["date"], "%Y-%m-%d %H:%M")
+    except (KeyError, ValueError):
+        return None
+    return {"date": dt, "PM25": pm25, "NO2": no2, "O3": o3, "SO2": so2, "CO": co}
+
+
+def _fetch_station_history(name: str, code: str) -> tuple[str, list[dict]]:
+    """Devuelve (nombre, lista de filas) con las últimas ~LOOKBACK_HOURS horas no nulas."""
+    # Pedimos 3 días para tener margen: el endpoint Pentaho corta hasta el final del día
+    # finish, así que para garantizar ≥48 h no nulas pedimos ventana amplia.
+    finish = datetime.now().strftime("%Y-%m-%d")
+    start  = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    url    = _RVVCCA_JSON_TPL.format(start=start, finish=finish, code=code)
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
     for attempt in range(1, _HTTP_RETRIES + 1):
         try:
-            resp = requests.get(url, headers=headers, timeout=20)
+            resp = requests.get(url, headers=headers, timeout=25)
             if resp.status_code >= 500:
                 raise requests.HTTPError(f"{resp.status_code} {resp.reason}", response=resp)
             resp.raise_for_status()
             rows = resp.json()
-            if not isinstance(rows, list) or not rows:
-                return name, None
+            if not isinstance(rows, list):
+                return name, []
 
-            # De la última hora hacia atrás, devolver la primera con alguna lectura útil.
-            for row in reversed(rows):
-                pm25 = row.get("PM2.5")
-                no2  = row.get("NO2")
-                o3   = row.get("O3")
-                if pm25 is None and no2 is None and o3 is None:
-                    continue
-                record = {}
-                if pm25 is not None: record["PM25"] = float(pm25)
-                if no2  is not None: record["NO2"]  = float(no2)
-                if o3   is not None: record["O3"]   = float(o3)
-                return name, {**_AIR_FALLBACK, **record}
-            return name, None
+            parsed = [r for r in (_parse_row(row) for row in rows) if r is not None]
+            parsed.sort(key=lambda r: r["date"])
+            # Devolvemos hasta las últimas LOOKBACK_HOURS filas (el bucle del modelo necesita 48).
+            return name, parsed[-LOOKBACK_HOURS:]
+
         except (requests.HTTPError, requests.Timeout, requests.ConnectionError) as e:
             if attempt < _HTTP_RETRIES:
                 wait = _HTTP_BACKOFF_S * (2 ** (attempt - 1))
@@ -85,40 +100,83 @@ def _fetch_station_latest(name: str, code: str) -> tuple[str, dict | None]:
                 continue
             logger.warning("fetch %s (%s) falló tras %d intentos: %s",
                            name, code, _HTTP_RETRIES, e)
-            return name, None
+            return name, []
         except Exception as e:  # noqa: BLE001
             logger.warning("fetch %s (%s) error inesperado: %s", name, code, e)
-            return name, None
+            return name, []
+    return name, []
 
 
-def fetch_air_quality() -> dict[str, dict]:
-    """Extrae O3, NO2 y PM2.5 de la red RVVCCA para cada estación.
+def _synthesize_history(last_real_hour: datetime | None) -> list[dict]:
+    """Genera LOOKBACK_HOURS filas planas con valores del fallback. Se usa cuando una
+    estación no devuelve ningún dato — necesitamos al menos una semilla para el bucle."""
+    end = last_real_hour or datetime.now().replace(minute=0, second=0, microsecond=0)
+    return [
+        {"date": end - timedelta(hours=LOOKBACK_HOURS - 1 - i),
+         **_AIR_FALLBACK}
+        for i in range(LOOKBACK_HOURS)
+    ]
 
-    Usa el endpoint JSON oficial de la GVA (`HourlyAverage.cda` via Pentaho), con
-    paralelismo limitado a 2 hilos para no saturar el backend (que devuelve 500 con
-    >3 peticiones simultáneas). Cada estación tiene reintentos con backoff.
-    Si una estación falla definitivamente, se usa el fallback fijo (no aleatorio)
-    para que las predicciones sean estables entre refrescos.
+
+def fetch_air_quality() -> dict[str, list[dict]]:
+    """Devuelve el historial reciente (~48 h) por estación.
+
+    Cada entrada es `{date: datetime, PM25, NO2, O3, SO2, CO}` (los valores pueden ser
+    None si la GVA no publicó esa hora para ese contaminante). Las estaciones sin
+    ningún dato se rellenan con el fallback estable (no aleatorio).
     """
-    data: dict[str, dict] = {}
+    data: dict[str, list[dict]] = {}
     with ThreadPoolExecutor(max_workers=_MAX_PARALLEL) as pool:
-        futures = [pool.submit(_fetch_station_latest, name, code)
+        futures = [pool.submit(_fetch_station_history, name, code)
                    for name, code in STATION_CODES.items()]
         for f in as_completed(futures):
-            name, record = f.result()
-            if record is not None:
-                data[name] = record
+            name, rows = f.result()
+            data[name] = rows
+
+    # Determinar la última hora real disponible en cualquier estación (para alinear la
+    # síntesis de las que vinieron vacías).
+    all_dates = [r["date"] for rows in data.values() for r in rows]
+    last_real_hour = max(all_dates) if all_dates else None
 
     for name in STATION_NAMES:
-        if name not in data:
-            logger.warning("Sin datos para %s — usando fallback fijo", name)
-            data[name] = _AIR_FALLBACK.copy()
+        if not data.get(name):
+            logger.warning("Sin datos para %s — sintetizando con fallback", name)
+            data[name] = _synthesize_history(last_real_hour)
+        elif len(data[name]) < LOOKBACK_HOURS:
+            # Pad por delante con copias de la primera fila para llegar a 48.
+            pad = LOOKBACK_HOURS - len(data[name])
+            first = data[name][0]
+            front = [{"date": first["date"] - timedelta(hours=pad - i), **{k: first[k] for k in ("PM25","NO2","O3","SO2","CO")}}
+                     for i in range(pad)]
+            data[name] = front + data[name]
 
     return data
 
 
-def fetch_meteo(date_str: str | None = None) -> dict:
-    """Obtiene datos meteorológicos de Meteostat para Valencia (estación 08284)."""
+def last_real_reading(history: dict[str, list[dict]]) -> dict[str, dict]:
+    """Última lectura real por estación y gas. Devuelve `None` para gases que la
+    estación no publica (no rellena con fallback)."""
+    out: dict[str, dict] = {}
+    for station, rows in history.items():
+        rec: dict[str, float | None] = {"O3": None, "NO2": None, "PM25": None}
+        # Recorrer de más reciente a más antiguo; cada gas se rellena con su
+        # último valor real disponible (independientemente de los demás).
+        for row in reversed(rows):
+            for gas in ("PM25", "NO2", "O3"):
+                if rec[gas] is None and row.get(gas) is not None:
+                    rec[gas] = float(row[gas])
+            if all(rec[g] is not None for g in ("PM25", "NO2", "O3")):
+                break
+        out[station] = rec
+    return out
+
+
+# ── Fallback meteorológico (sólo para el "ahora", no para el forecast 168h) ──
+
+def fetch_meteo_now(date_str: str | None = None) -> dict:
+    """Obtiene los valores meteo actuales de Meteostat para Valencia. Usado sólo como
+    fallback cuando Open-Meteo no responde, o para alimentar el campo `meteo` del
+    Snapshot que representa el estado meteo a t=0."""
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -144,5 +202,5 @@ def fetch_meteo(date_str: str | None = None) -> dict:
         meteo.setdefault("Direccion_viento", 180.0)
         return {**_METEO_FALLBACK, **meteo}
     except Exception as e:  # noqa: BLE001
-        logger.warning("fetch_meteo failed, using fallback values: %s", e)
+        logger.warning("fetch_meteo_now failed, using fallback: %s", e)
         return _METEO_FALLBACK

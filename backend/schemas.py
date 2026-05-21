@@ -19,26 +19,37 @@ class Meteo(BaseModel):
 
 
 class AirReading(BaseModel):
-    O3: float
-    NO2: float
-    PM25: float
+    """Última lectura real publicada por la GVA para esa estación. Cada gas es
+    `None` si la centralita no tiene sensor para ese contaminante (p. ej. Centre
+    no mide O3, Vivers no mide PM2.5)."""
+    O3: float | None = None
+    NO2: float | None = None
+    PM25: float | None = None
 
 
 class Snapshot(BaseModel):
-    """Estado completo de la red en un instante dado.
+    """Estado completo de la red.
 
-    `forecasts` es un dict {nombre_estacion → 169 valores horarios de PM2.5}, donde
-    el índice 0 es t=0 (hora actual) y el 168 es t+168h (=7 días).
-    `current` recoge las mediciones actuales de O3/NO2/PM2.5 por estación.
+    `forecasts[pollutant][station]` = lista de 169 valores horarios (idx 0 = now,
+    idx 168 = now + 168 h = +7 días). Si una estación no es soportada por un modelo
+    concreto NO aparece en su dict.
+
+    `supported_stations[pollutant]` = lista canónica de estaciones que cada modelo
+    puede predecir (útil para que el frontend sepa cuáles colorear vs. cuáles dejar
+    en gris).
     """
     generated_at: datetime
+    last_real_data_at: datetime
     stations: list[Station]
     meteo: Meteo
-    forecasts: dict[str, list[float]]
     current: dict[str, AirReading]
+    forecasts: dict[str, dict[str, list[float]]]
+    supported_stations: dict[str, list[str]]
 
 
 class HealthResponse(BaseModel):
     status: str = "ok"
     last_snapshot: datetime | None = None
+    last_real_data_at: datetime | None = None
     next_refresh_in_min: int = Field(default=0, description="Minutos hasta el próximo refresco programado")
+    pollutants: list[str] = Field(default_factory=list)
