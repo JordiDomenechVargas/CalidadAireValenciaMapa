@@ -68,16 +68,17 @@ def build_map(
     selected: str | None,
     pollutant: str,
     supported_stations: list[str],
+    forecast_start: datetime,
     show_coverage: bool = False,
 ) -> folium.Map:
     """Mapa Folium con un CircleMarker por estación.
 
-    - Si la estación está en `supported_stations`: color según AQI del valor previsto.
+    - Si la estación está en `supported_stations`: color según AQI del valor previsto
+      en `forecast_start + hour_idx h`.
     - Si no: color gris y tooltip indicando "no disponible".
     """
     m = folium.Map(location=[39.4697, -0.3774], zoom_start=12, tiles="CartoDB positron")
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
-    dt_label = (now + timedelta(hours=hour_idx)).strftime("%d/%m/%Y %H:%M")
+    dt_label = (forecast_start + timedelta(hours=hour_idx)).strftime("%d/%m/%Y %H:%M")
     poll_lbl = POLLUTANT_LABELS[pollutant]
     units    = POLLUTANT_UNITS[pollutant]
 
@@ -88,8 +89,7 @@ def build_map(
         is_supported = name in supported_stations
 
         if is_supported:
-            fc = forecasts_for_pollutant.get(name, [0.0] * 169)
-            current = fc[0]
+            fc = forecasts_for_pollutant.get(name, [0.0] * 168)
             predicted = fc[hour_idx] if hour_idx < len(fc) else fc[-1]
             color = aqi_color(predicted, pollutant)
             popup_html = f"""
@@ -98,10 +98,7 @@ def build_map(
                         box-shadow:0 2px 8px rgba(31,35,40,0.12);">
               <b style="font-family:'Space Mono',monospace;font-size:13px">{name}</b><br>
               <hr style="border-color:#d0d7de;margin:6px 0">
-              <span style="font-size:11px;color:#57606a">{poll_lbl} AHORA (t=0)</span><br>
-              <span style="font-size:22px;font-weight:700;color:{aqi_color(current, pollutant)}">{current:.1f} {units}</span>
-              <br><br>
-              <span style="font-size:11px;color:#57606a">PREVISIÓN · {dt_label}</span><br>
+              <span style="font-size:11px;color:#57606a">{poll_lbl} previsto · {dt_label}</span><br>
               <span style="font-size:22px;font-weight:700;color:{color}">{predicted:.1f} {units}</span>
               <br>
               <span style="font-size:11px;color:{color};background:rgba(255,255,255,0.05);
@@ -184,8 +181,14 @@ _MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun",
               "jul", "ago", "sep", "oct", "nov", "dic"]
 
 
-def build_forecast_chart(forecasts_for_pollutant: dict, station: str, pollutant: str) -> go.Figure:
-    """Gráfico Plotly de la previsión 168 h. Si la estación no está en el dict (no soportada),
+def build_forecast_chart(
+    forecasts_for_pollutant: dict,
+    station: str,
+    pollutant: str,
+    forecast_start: datetime,
+) -> go.Figure:
+    """Gráfico Plotly de la previsión 168 h. El eje X arranca en `forecast_start` (el
+    primer timestamp del CSV). Si la estación no está en el dict (no soportada),
     devuelve una figura con texto explicativo."""
     poll_lbl = POLLUTANT_LABELS[pollutant]
     units    = POLLUTANT_UNITS[pollutant]
@@ -206,8 +209,7 @@ def build_forecast_chart(forecasts_for_pollutant: dict, station: str, pollutant:
         return fig
 
     fc = forecasts_for_pollutant[station]
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
-    times = [now + timedelta(hours=h) for h in range(len(fc))]
+    times = [forecast_start + timedelta(hours=h) for h in range(len(fc))]
 
     fig = go.Figure()
 
@@ -234,7 +236,8 @@ def build_forecast_chart(forecasts_for_pollutant: dict, station: str, pollutant:
     ))
 
     fig.add_vline(x=times[0], line_dash="dash", line_color="#57606a", line_width=1)
-    fig.add_annotation(x=times[0], y=max(fc) * 0.9, text="Ahora",
+    fig.add_annotation(x=times[0], y=max(fc) * 0.9,
+                       text=f"Inicio · {times[0].strftime('%d/%m %H:%M')}",
                        showarrow=False, font=dict(color="#57606a", size=11))
 
     # Ticks personalizados con nombres de día en español (Plotly no respeta locale Python).

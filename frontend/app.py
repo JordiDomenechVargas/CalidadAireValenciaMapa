@@ -108,10 +108,10 @@ def main():
     # ── Header ──
     st.markdown("""
     <h1 style="font-size:1.6rem;margin-bottom:0;color:#1f2328">
-      🌿 Calidad del Aire · Valencia
+      Calidad del Aire · Valencia
     </h1>
     <p style="color:#57606a;font-size:0.85rem;margin-top:4px;font-family:'DM Sans',sans-serif">
-      PM2.5 · NO₂ · O₃ en tiempo real + previsión 168 horas · datos vía API
+      PM2.5 · NO₂ · O₃ — calidad del aire y previsión hasta 7 días
     </p>
     """, unsafe_allow_html=True)
 
@@ -126,10 +126,12 @@ def main():
 
     stations     = snapshot["stations"]
     meteo        = snapshot["meteo"]
-    forecasts    = snapshot["forecasts"]                  # dict[pollutant → dict[station → list[169]]]
+    forecasts    = snapshot["forecasts"]                  # dict[pollutant → dict[station → list[168]]]
     current      = snapshot["current"]
     supported    = snapshot["supported_stations"]         # dict[pollutant → list[station]]
-    station_names = [s["name"] for s in stations]
+    forecast_start = datetime.fromisoformat(snapshot["forecast_start_at"])
+    forecast_end   = forecast_start + timedelta(hours=167)   # 168 valores → idx 0..167
+    station_names  = [s["name"] for s in stations]
 
     if "selected_station" not in st.session_state or st.session_state.selected_station not in station_names:
         default = "Av. França" if "Av. França" in station_names else station_names[0]
@@ -140,30 +142,40 @@ def main():
         st.markdown("### ⚙️ Controles")
 
         pollutant_display = st.radio(
-            "🧪 Contaminante",
+            "Contaminante",
             POLLUTANT_OPTIONS,
             horizontal=True,
-            help="PM2.5: 7 estaciones · NO₂: 9 · O₃: 6",
         )
         pollutant = POLLUTANT_KEY[pollutant_display]
         poll_lbl  = POLLUTANT_LABELS[pollutant]
         units     = POLLUTANT_UNITS[pollutant]
 
         today = date.today()
-        now_hour = datetime.now().replace(minute=0, second=0, microsecond=0)
-        current_hour = now_hour.hour
+        forecast_start_date = forecast_start.date()
+        forecast_end_date   = forecast_end.date()
+
+        # Si hoy está dentro del rango del CSV, lo usamos como default; si no, el primer día.
+        default_date = today if forecast_start_date <= today <= forecast_end_date else forecast_start_date
 
         selected_date = st.date_input(
             "📅 Día de previsión",
-            value=today,
-            min_value=today,
-            max_value=today + timedelta(days=7),
+            value=default_date,
+            min_value=forecast_start_date,
+            max_value=forecast_end_date,
             format="DD/MM/YYYY",
-            help="Día para la previsión (hasta +7 días)",
+            help=f"Rango del CSV: {forecast_start_date.strftime('%d/%m')} → {forecast_end_date.strftime('%d/%m')}",
         )
 
-        # Hora por defecto: la actual si es hoy, mediodía si es futuro.
-        default_hour = current_hour if selected_date == today else 12
+        # Hora por defecto:
+        #   - hoy dentro de rango → hora actual del reloj
+        #   - día inicial del CSV → primera hora cubierta
+        #   - cualquier otro → 12 h
+        if selected_date == today and forecast_start_date <= today <= forecast_end_date:
+            default_hour = datetime.now().hour
+        elif selected_date == forecast_start_date:
+            default_hour = forecast_start.hour
+        else:
+            default_hour = 12
         selected_hour = st.slider(
             "⏰ Hora del día",
             min_value=0,
@@ -172,13 +184,13 @@ def main():
             help="Hora a la que quieres ver la previsión (0-23)",
         )
 
+        # hour_idx = horas desde forecast_start_at hasta el target, clamped [0, 167]
         target_dt = datetime.combine(selected_date, time(selected_hour, 0))
-        hour_idx = max(0, min(int((target_dt - now_hour).total_seconds() / 3600), 168))
-        dt_sel = now_hour + timedelta(hours=hour_idx)
+        hour_idx  = max(0, min(int((target_dt - forecast_start).total_seconds() / 3600), 167))
+        dt_sel    = forecast_start + timedelta(hours=hour_idx)
 
-        # Si lo elegido cae fuera del rango del modelo, avisamos en una caption.
         if dt_sel != target_dt:
-            st.caption(f"⚠️ Fuera del rango previsto. Mostrando: {_fmt_es(dt_sel)}")
+            st.caption(f"⚠️ Fuera del rango del CSV. Mostrando: {_fmt_es(dt_sel)}")
         else:
             st.caption(f"⏱ Previsión para: {_fmt_es(dt_sel)}")
 
@@ -248,9 +260,9 @@ def main():
             real_ts = h.get("last_real_data_at")
             caption_lines = []
             if ts:
-                caption_lines.append(f"🆕 Snapshot: {datetime.fromisoformat(ts).strftime('%H:%M:%S')}")
+                caption_lines.append(f"Snapshot: {datetime.fromisoformat(ts).strftime('%H:%M:%S')}")
             if real_ts:
-                caption_lines.append(f"📡 Última lectura GVA: {datetime.fromisoformat(real_ts).strftime('%H:%M')}")
+                caption_lines.append(f"Última lectura GVA: {datetime.fromisoformat(real_ts).strftime('%H:%M')}")
             caption_lines.append(f"Próximo refresco en: {h.get('next_refresh_in_min', 0)} min")
             st.caption("\n\n".join(caption_lines))
         except BackendUnavailable:
@@ -265,8 +277,9 @@ def main():
     col_map, col_right = st.columns([3, 2], gap="medium")
 
     with col_map:
-        st.markdown(f"#### 🗺 Mapa · {poll_lbl} · {'+' + str(hour_idx) + 'h' if hour_idx else 'Ahora'}")
-        m = build_map(stations, forecasts_p, hour_idx, selected_station, pollutant, supported_p, show_coverage)
+        st.markdown(f"#### Mapa · {poll_lbl} · {dt_sel.strftime('%d/%m %H:%M')}")
+        m = build_map(stations, forecasts_p, hour_idx, selected_station, pollutant,
+                      supported_p, forecast_start, show_coverage)
         map_state = st_folium(
             m,
             width=None,
@@ -284,9 +297,8 @@ def main():
                 st.rerun()
 
     # ── Etiquetas de tiempo para los cards ─────────────────────────
-    now_str = now_hour.strftime("%H:%M")
     if dt_sel.date() == today:
-        pred_time_str = dt_sel.strftime("%H:%M")
+        pred_time_str = f"hoy {dt_sel.strftime('%H:%M')}"
     elif dt_sel.date() == today + timedelta(days=1):
         pred_time_str = f"mañana {dt_sel.strftime('%H:%M')}"
     else:
@@ -295,11 +307,17 @@ def main():
     last_real_label = ""
     if snapshot.get("last_real_data_at"):
         last_real_dt = datetime.fromisoformat(snapshot["last_real_data_at"])
-        hours_ago = max(0, int((datetime.now() - last_real_dt).total_seconds() / 3600))
-        if hours_ago > 0:
-            last_real_label = f"{last_real_dt.strftime('%H:%M')} · hace {hours_ago} h"
+        delta_s = max(0, int((datetime.now() - last_real_dt).total_seconds()))
+        h, m = delta_s // 3600, (delta_s % 3600) // 60
+        if h > 0 and m > 0:
+            ago = f"hace {h} h {m} min"
+        elif h > 0:
+            ago = f"hace {h} h"
+        elif m > 0:
+            ago = f"hace {m} min"
         else:
-            last_real_label = last_real_dt.strftime("%H:%M")
+            ago = "ahora mismo"
+        last_real_label = f"{last_real_dt.strftime('%H:%M')} · {ago}"
 
     with col_right:
         st.markdown(f"#### 📍 {selected_station}")
@@ -311,37 +329,24 @@ def main():
               <div class="value aqi-disabled">— {units}</div>
               <div style="font-size:12px;color:#57606a;margin-top:4px">
                 No disponible para esta estación.<br>
-                El modelo no tiene datos de entrenamiento para esta centralita.<br>
+                El CSV de previsiones no incluye datos de este contaminante aquí.<br>
                 Selecciona otra estación o cambia el contaminante.
               </div>
             </div>
             """, unsafe_allow_html=True)
         else:
             fc_sel = forecasts_p[selected_station]
-            val_now  = fc_sel[0]
             val_pred = fc_sel[hour_idx]
-            delta    = val_pred - val_now
 
-            # Card 1: predicción para ahora
+            # Una sola card: valor previsto para la fecha/hora seleccionadas
             st.markdown(f"""
             <div class="metric-card">
-              <div class="label">{poll_lbl} previsto · {now_str}</div>
-              <div class="value {aqi_class(val_now, pollutant)}">{val_now:.1f} {units}</div>
-              <div style="font-size:12px;color:#57606a;margin-top:4px">{aqi_label(val_now, pollutant)}</div>
+              <div class="label">{poll_lbl} previsto · {pred_time_str}</div>
+              <div class="value {aqi_class(val_pred, pollutant)}">{val_pred:.1f} {units}</div>
+              <div style="font-size:12px;color:#57606a;margin-top:4px">{aqi_label(val_pred, pollutant)}</div>
             </div>
             """, unsafe_allow_html=True)
 
-            # Card 2: predicción para una fecha futura (solo si hour_idx > 0)
-            if hour_idx > 0:
-                st.markdown(f"""
-                <div class="metric-card">
-                  <div class="label">{poll_lbl} previsto · {pred_time_str} (+{hour_idx} h)</div>
-                  <div class="value {aqi_class(val_pred, pollutant)}">{val_pred:.1f} {units}
-                    <span style="font-size:14px;color:#57606a"> ({'+' if delta >= 0 else ''}{delta:.1f})</span>
-                  </div>
-                  <div style="font-size:12px;color:#57606a;margin-top:4px">{aqi_label(val_pred, pollutant)}</div>
-                </div>
-                """, unsafe_allow_html=True)
 
         # ── Contaminantes actuales (medida real GVA) ─────────────
         # Para los gases en los que la estación está en el modelo: lectura real.
@@ -378,35 +383,34 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown(f"#### 📊 Resumen estaciones · {poll_lbl}")
+        sel_label = dt_sel.strftime("%d/%m %H:%M")
+        st.markdown(f"#### 📊 Resumen estaciones · {poll_lbl} · {sel_label}")
         rows = []
         for name in station_names:
             if name in supported_p:
                 fc = forecasts_p[name]
                 rows.append({
                     "Estación": name,
-                    "Ahora": f"{fc[0]:.1f}",
-                    f"+{hour_idx}h": f"{fc[hour_idx]:.1f}",
+                    "Valor": f"{fc[hour_idx]:.1f}",
                     "Estado": aqi_label(fc[hour_idx], pollutant),
                 })
             else:
                 rows.append({
                     "Estación": name,
-                    "Ahora": "—",
-                    f"+{hour_idx}h": "—",
-                    "Estado": "no disponible",
+                    "Valor": "—",
+                    "Estado": "No disponible",
                 })
         df_summary = pd.DataFrame(rows).set_index("Estación")
         st.dataframe(df_summary, width="stretch", height=320)
 
     st.markdown(f"#### 📈 Tendencia 7 días · {selected_station} · {poll_lbl}")
-    fig = build_forecast_chart(forecasts_p, selected_station, pollutant)
+    fig = build_forecast_chart(forecasts_p, selected_station, pollutant, forecast_start)
     st.plotly_chart(fig, width="stretch")
 
     st.markdown("""
     <hr style="border-color:#d0d7de;margin-top:32px">
     <p style="text-align:center;font-size:11px;color:#57606a;font-family:'DM Sans',sans-serif">
-      Datos: RVVCCA GVA · Open-Meteo · Pipeline CBLA multi-estación (CNN-BiLSTM + XGBoost) servido por API FastAPI
+      Datos: RVVCCA GVA · Open-Meteo · servidos vía API FastAPI
     </p>
     """, unsafe_allow_html=True)
 
