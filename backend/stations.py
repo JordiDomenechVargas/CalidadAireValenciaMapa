@@ -58,3 +58,22 @@ MODEL_NAME_TO_CANONICAL: dict[str, str] = {
 }
 
 CANONICAL_TO_MODEL_NAME: dict[str, str] = {v: k for k, v in MODEL_NAME_TO_CANONICAL.items()}
+
+# Cobertura física real según las mediciones publicadas por la RVVCCA:
+# qué centralitas tienen efectivamente sensor para cada contaminante.
+# El CSV de previsiones puede traer valores para estaciones sin sensor real
+# (extrapolaciones); aquí filtramos para no mostrarlas como dato fiable.
+#   - Vivers / Bulevard Sud NO tienen sensor de PM2.5
+#   - Centre NO tiene sensor de O3
+#   - Todas miden NO2
+PHYSICAL_COVERAGE: dict[str, list[str]] = {
+    "PM25": [
+        "Port Moll Trans. Ponent", "Pista de Silla", "Politècnic",
+        "Av. França", "Molí del Sol", "Centre", "Port llit antic Túria",
+    ],
+    "NO2": STATION_NAMES,
+    "O3": [
+        "Port Moll Trans. Ponent", "Pista de Silla", "Vivers", "Politècnic",
+        "Av. França", "Molí del Sol", "Bulevard Sud", "Port llit antic Túria",
+    ],
+}

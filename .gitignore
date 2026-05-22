@@ -1,16 +1,17 @@
 .venv/
-*.pkl
 __pycache__/
 *.pyc
-.streamlit/secrets.toml
 .env
-cache_air_quality.csv
-cache_meteo.csv
+.streamlit/secrets.toml
+
+# Modelos ML pesados (no se versionan en el repo, no se usan actualmente, pero por si acaso los dejo)
+*.pkl
 *.keras
 xgb_meta_model*.json
-CBLA.ipynb
 
 # Backend / frontend
-backend/models/
+# "backend/models" ya no se usa para almacenar modelos, pero por si acaso lo dejo
+backend/models/ 
+backend/data/
 backend/.env
 frontend/.env

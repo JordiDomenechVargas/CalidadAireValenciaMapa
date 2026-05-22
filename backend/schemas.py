@@ -30,15 +30,16 @@ class AirReading(BaseModel):
 class Snapshot(BaseModel):
     """Estado completo de la red.
 
-    `forecasts[pollutant][station]` = lista de 169 valores horarios (idx 0 = now,
-    idx 168 = now + 168 h = +7 días). Si una estación no es soportada por un modelo
-    concreto NO aparece en su dict.
+    `forecasts[pollutant][station]` = lista de 168 valores horarios consecutivos
+    empezando en `forecast_start_at`. Para una hora target T, el índice en la lista
+    es `int((T - forecast_start_at).total_seconds() / 3600)`, clamped a [0, 167].
 
-    `supported_stations[pollutant]` = lista canónica de estaciones que cada modelo
-    puede predecir (útil para que el frontend sepa cuáles colorear vs. cuáles dejar
-    en gris).
+    `supported_stations[pollutant]` = lista canónica de estaciones que el CSV cubre
+    para ese contaminante. Actualmente las 9 están en los 3, pero se mantiene la
+    estructura por flexibilidad futura.
     """
     generated_at: datetime
+    forecast_start_at: datetime
     last_real_data_at: datetime
     stations: list[Station]
     meteo: Meteo
