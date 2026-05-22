@@ -64,12 +64,12 @@ Snapshot in-memory ──── lo expone main.py vía /snapshot
 - Al arrancar la API se genera el primer snapshot en `lifespan`.
 - Cada `REFRESH_INTERVAL_MINUTES` (default 60) el scheduler lo regenera en background.
 - Los endpoints leen el snapshot in-memory → respuesta < 1 ms.
-- El CSV se relee con detección de mtime: si tus compañeros no lo han actualizado,
+- El CSV se relee con detección de mtime: si no se ha actualizado,
   no se relee (se devuelve la versión cacheada).
 
 ## Cobertura por contaminante
 
-El CSV contiene previsiones para 10 estaciones × 3 contaminantes, pero filtramos según
+El CSV contiene previsiones para 9 estaciones × 3 contaminantes, pero filtramos según
 `PHYSICAL_COVERAGE` (centralitas con sensor real de cada gas según la RVVCCA):
 
 - **PM2.5**: 7 estaciones (sin Vivers, sin Bulevard Sud)
