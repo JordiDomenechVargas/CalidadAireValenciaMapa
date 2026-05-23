@@ -47,9 +47,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: el frontend vive en Streamlit Community Cloud (subdominio variable
+# `*.streamlit.app`) y en local en `localhost:8501`. Restringimos a esos orígenes
+# para que no cualquier sitio web pueda golpear la API desde su JS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^https?://(localhost(:\d+)?|127\.0\.0\.1(:\d+)?|.*\.streamlit\.app)$",
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

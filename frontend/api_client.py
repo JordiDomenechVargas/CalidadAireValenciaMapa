@@ -7,8 +7,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_URL = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
-REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
+
+def _get_setting(key: str, default: str = "") -> str:
+    """Lee config primero de `st.secrets` (Streamlit Cloud), luego de variables de
+    entorno (.env local), y por último el default. Streamlit Cloud no siempre expone
+    los secrets como env vars, así que hay que consultarlos explícitamente."""
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except (FileNotFoundError, Exception):
+        pass
+    return os.getenv(key, default)
+
+
+API_URL = _get_setting("API_URL", "http://localhost:8000").rstrip("/")
+REFRESH_TOKEN = _get_setting("REFRESH_TOKEN", "")
 
 
 class BackendUnavailable(RuntimeError):
