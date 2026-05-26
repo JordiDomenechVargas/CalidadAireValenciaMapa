@@ -23,15 +23,25 @@ from ui import (
 )
 
 
+_LOGO_CANDIDATES = (
+    "logo_ayuntamiento_vlc.jpg",
+    "ajuntament-valencia.png",
+)
+_MIME_BY_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".svg": "image/svg+xml"}
+
+
 @st.cache_data
-def _ajuntament_logo_b64() -> str:
-    """Devuelve el PNG del logo del Ajuntament codificado en base64 para inline en HTML.
-    Si el archivo no existe (ej. el usuario no lo ha puesto aún), devuelve string vacío
-    y el bloque del logo no se renderiza."""
-    path = Path(__file__).parent / "assets" / "ajuntament-valencia.png"
-    if not path.exists():
-        return ""
-    return base64.b64encode(path.read_bytes()).decode()
+def _ajuntament_logo() -> tuple[str, str]:
+    """Devuelve (base64, mime_type) del logo del Ajuntament para embeber inline en HTML.
+    Busca en `assets/` el primer candidato que exista. Si ninguno existe, devuelve
+    ("", "") y el bloque del logo no se renderiza."""
+    assets_dir = Path(__file__).parent / "assets"
+    for filename in _LOGO_CANDIDATES:
+        path = assets_dir / filename
+        if path.exists():
+            mime = _MIME_BY_EXT.get(path.suffix.lower(), "image/png")
+            return base64.b64encode(path.read_bytes()).decode(), mime
+    return "", ""
 
 _DAYS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 _MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
@@ -119,12 +129,12 @@ div[data-testid="stDeployButton"] { display: none !important; }
 """, unsafe_allow_html=True)
 
 # Logo del Ajuntament + link al portal de datos abiertos (esquina superior derecha)
-_logo_b64 = _ajuntament_logo_b64()
+_logo_b64, _logo_mime = _ajuntament_logo()
 if _logo_b64:
     st.markdown(
         f'<a class="ajuntament-link" href="https://opendata.vlci.valencia.es/" '
         f'target="_blank" rel="noopener" title="Datos abiertos · Ajuntament de València">'
-        f'<img src="data:image/png;base64,{_logo_b64}" alt="Ajuntament de València" />'
+        f'<img src="data:{_logo_mime};base64,{_logo_b64}" alt="Ajuntament de València" />'
         f'</a>',
         unsafe_allow_html=True,
     )
