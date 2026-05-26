@@ -8,12 +8,23 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import base64
+import os
 from datetime import datetime, date, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
+
+# Zona horaria local de la app. Streamlit Cloud corre los contenedores en UTC; usamos
+# Europe/Madrid para que la hora mostrada al usuario coincida con su reloj real.
+_LOCAL_TZ = ZoneInfo(os.getenv("APP_TZ", "Europe/Madrid"))
+
+
+def _now_local() -> datetime:
+    """Hora actual en LOCAL_TZ, como datetime naive (sin tzinfo)."""
+    return datetime.now(_LOCAL_TZ).replace(tzinfo=None)
 
 from api_client import get_snapshot, force_refresh, health, BackendUnavailable, API_URL
 from ui import (
@@ -190,7 +201,7 @@ def main():
         poll_lbl  = POLLUTANT_LABELS[pollutant]
         units     = POLLUTANT_UNITS[pollutant]
 
-        today = date.today()
+        today = _now_local().date()
         forecast_start_date = forecast_start.date()
         forecast_end_date   = forecast_end.date()
 
@@ -211,7 +222,7 @@ def main():
         #   - día inicial del CSV → primera hora cubierta
         #   - cualquier otro → 12 h
         if selected_date == today and forecast_start_date <= today <= forecast_end_date:
-            default_hour = datetime.now().hour
+            default_hour = _now_local().hour
         elif selected_date == forecast_start_date:
             default_hour = forecast_start.hour
         else:
@@ -347,7 +358,7 @@ def main():
     last_real_label = ""
     if snapshot.get("last_real_data_at"):
         last_real_dt = datetime.fromisoformat(snapshot["last_real_data_at"])
-        delta_s = max(0, int((datetime.now() - last_real_dt).total_seconds()))
+        delta_s = max(0, int((_now_local() - last_real_dt).total_seconds()))
         h, m = delta_s // 3600, (delta_s % 3600) // 60
         if h > 0 and m > 0:
             ago = f"hace {h} h {m} min"

@@ -15,6 +15,7 @@ from .weather import fetch_weather_window
 from .forecast_loader import get_forecasts, refresh_csv, supported_stations
 from .schemas import Snapshot, Station, Meteo, AirReading
 from .stations import STATIONS
+from .config import now_local
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ def _build_snapshot() -> Snapshot:
     air_history = fetch_air_quality()
     weather     = fetch_weather_window()
 
-    now_hour    = datetime.now().replace(minute=0, second=0, microsecond=0)
+    now_hour    = now_local().replace(minute=0, second=0, microsecond=0)
     meteo_now   = _meteo_now_from_window(weather, now_hour)
 
     forecasts, forecast_start_at = get_forecasts()
@@ -54,7 +55,7 @@ def _build_snapshot() -> Snapshot:
     last_real_hour = max(all_dates) if all_dates else now_hour
 
     snap = Snapshot(
-        generated_at=datetime.now(),
+        generated_at=now_local(),
         forecast_start_at=forecast_start_at,
         last_real_data_at=last_real_hour,
         stations=[Station(name=name, lat=lat, lon=lon) for name, (lat, lon) in STATIONS.items()],
