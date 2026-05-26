@@ -102,23 +102,13 @@ def _fetch_station_history(name: str, code: str) -> tuple[str, list[dict]]:
     return name, []
 
 
-def _synthesize_history(last_real_hour: datetime | None) -> list[dict]:
-    """Genera LOOKBACK_HOURS filas planas con valores del fallback. Se usa cuando una
-    estación no devuelve ningún dato — necesitamos al menos una semilla para el bucle."""
-    end = last_real_hour or now_local().replace(minute=0, second=0, microsecond=0)
-    return [
-        {"date": end - timedelta(hours=LOOKBACK_HOURS - 1 - i),
-         **_AIR_FALLBACK}
-        for i in range(LOOKBACK_HOURS)
-    ]
-
-
 def fetch_air_quality() -> dict[str, list[dict]]:
-    """Devuelve el historial reciente (~48 h) por estación.
+    """Devuelve el historial reciente (hasta ~48 h) por estación.
 
     Cada entrada es `{date: datetime, PM25, NO2, O3, SO2, CO}` (los valores pueden ser
-    None si la GVA no publicó esa hora para ese contaminante). Las estaciones sin
-    ningún dato se rellenan con el fallback estable (no aleatorio).
+    None si la GVA no publicó esa hora para ese contaminante). Si la GVA falla para
+    una estación, su lista quedará vacía → `last_real_reading` devolverá None para
+    sus gases y el frontend mostrará "—". NUNCA se inventan valores fake.
     """
     data: dict[str, list[dict]] = {}
     with ThreadPoolExecutor(max_workers=_MAX_PARALLEL) as pool:
@@ -128,22 +118,14 @@ def fetch_air_quality() -> dict[str, list[dict]]:
             name, rows = f.result()
             data[name] = rows
 
-    # Determinar la última hora real disponible en cualquier estación (para alinear la
-    # síntesis de las que vinieron vacías).
-    all_dates = [r["date"] for rows in data.values() for r in rows]
-    last_real_hour = max(all_dates) if all_dates else None
-
+    # Estaciones sin datos: se quedan con lista vacía. NO sintetizamos valores
+    # fake porque acabarían mostrándose en la card "Medida GVA" como si fueran
+    # mediciones reales.
     for name in STATION_NAMES:
-        if not data.get(name):
-            logger.warning("Sin datos para %s — sintetizando con fallback", name)
-            data[name] = _synthesize_history(last_real_hour)
-        elif len(data[name]) < LOOKBACK_HOURS:
-            # Pad por delante con copias de la primera fila para llegar a 48.
-            pad = LOOKBACK_HOURS - len(data[name])
-            first = data[name][0]
-            front = [{"date": first["date"] - timedelta(hours=pad - i), **{k: first[k] for k in ("PM25","NO2","O3","SO2","CO")}}
-                     for i in range(pad)]
-            data[name] = front + data[name]
+        if name not in data:
+            data[name] = []
+        if not data[name]:
+            logger.warning("Sin datos GVA para %s — la card 'Medida GVA' mostrará '—'", name)
 
     return data
 

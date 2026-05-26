@@ -40,7 +40,7 @@ class Snapshot(BaseModel):
     """
     generated_at: datetime
     forecast_start_at: datetime
-    last_real_data_at: datetime
+    last_real_data_at: datetime | None = None
     stations: list[Station]
     meteo: Meteo
     current: dict[str, AirReading]
