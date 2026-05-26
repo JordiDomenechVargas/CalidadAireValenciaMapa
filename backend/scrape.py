@@ -9,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .stations import STATION_CODES, STATION_NAMES
-from .config import LOOKBACK_HOURS, now_local
+from .config import LOOKBACK_HOURS, now_local, METEO_FALLBACK
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +27,8 @@ _RVVCCA_JSON_TPL = (
 _METEO_URL_TPL = "https://meteostat.net/es/station/08284?t={date}/{date}"
 
 _AIR_FALLBACK = {"O3": 35.0, "NO2": 25.0, "PM25": 15.0, "SO2": 4.0, "CO": 0.3}
-_METEO_FALLBACK = {
-    "Velocidad_viento": 3.5,
-    "Direccion_viento": 180.0,
-    "Temperatura": 20.0,
-    "Humedad_relativa": 60.0,
-    "Presion": 1013.0,
-    "Precipitacion": 0.0,
-}
+# Reexport para evitar romper imports antiguos
+_METEO_FALLBACK = METEO_FALLBACK
 
 _HTTP_RETRIES = 3
 _HTTP_BACKOFF_S = 1.5

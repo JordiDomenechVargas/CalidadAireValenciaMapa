@@ -15,7 +15,7 @@ from .weather import fetch_weather_window
 from .forecast_loader import get_forecasts, refresh_csv, supported_stations
 from .schemas import Snapshot, Station, Meteo, AirReading
 from .stations import STATIONS
-from .config import now_local
+from .config import now_local, METEO_FALLBACK
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,40 @@ def regenerate_snapshot() -> Snapshot:
     with _lock:
         _snapshot = _build_snapshot()
     return _snapshot
+
+
+def _is_fallback_meteo(m: dict) -> bool:
+    """Detecta si un dict meteo coincide exactamente con METEO_FALLBACK (Open-Meteo y
+    Meteostat caídos). En ese caso preferimos NO sobreescribir el último meteo bueno
+    que ya hubiera en el snapshot."""
+    return all(m.get(k) == v for k, v in METEO_FALLBACK.items())
+
+
+def refresh_meteo() -> bool:
+    """Refresca SOLO el campo `meteo` del snapshot global. Diseñado para correr
+    cada pocos minutos: hace una llamada ligera a Open-Meteo y, si recibe un valor
+    distinto del fallback, sustituye `_snapshot.meteo` en sitio.
+
+    Returns:
+        True si el meteo se actualizó con datos frescos.
+        False si Open-Meteo seguía caído o todavía no hay snapshot inicial.
+    """
+    global _snapshot
+    if _snapshot is None:
+        return False  # Esperar a que `regenerate_snapshot()` haya construido el primero
+
+    weather = fetch_weather_window()
+    now_hour = now_local().replace(minute=0, second=0, microsecond=0)
+    meteo_now = _meteo_now_from_window(weather, now_hour)
+
+    if _is_fallback_meteo(meteo_now):
+        logger.info("refresh_meteo: Open-Meteo+Meteostat siguen caídos, no se actualiza")
+        return False
+
+    with _lock:
+        _snapshot.meteo = Meteo(**meteo_now)
+    logger.info("refresh_meteo: meteo actualizado a %s", now_hour)
+    return True
 
 
 def get_snapshot() -> Snapshot | None:
