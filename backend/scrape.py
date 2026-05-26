@@ -9,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .stations import STATION_CODES, STATION_NAMES
-from .config import LOOKBACK_HOURS
+from .config import LOOKBACK_HOURS, now_local
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +71,9 @@ def _fetch_station_history(name: str, code: str) -> tuple[str, list[dict]]:
     """Devuelve (nombre, lista de filas) con las últimas ~LOOKBACK_HOURS horas no nulas."""
     # Pedimos 3 días para tener margen: el endpoint Pentaho corta hasta el final del día
     # finish, así que para garantizar ≥48 h no nulas pedimos ventana amplia.
-    finish = datetime.now().strftime("%Y-%m-%d")
-    start  = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    _now = now_local()
+    finish = _now.strftime("%Y-%m-%d")
+    start  = (_now - timedelta(days=3)).strftime("%Y-%m-%d")
     url    = _RVVCCA_JSON_TPL.format(start=start, finish=finish, code=code)
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
@@ -110,7 +111,7 @@ def _fetch_station_history(name: str, code: str) -> tuple[str, list[dict]]:
 def _synthesize_history(last_real_hour: datetime | None) -> list[dict]:
     """Genera LOOKBACK_HOURS filas planas con valores del fallback. Se usa cuando una
     estación no devuelve ningún dato — necesitamos al menos una semilla para el bucle."""
-    end = last_real_hour or datetime.now().replace(minute=0, second=0, microsecond=0)
+    end = last_real_hour or now_local().replace(minute=0, second=0, microsecond=0)
     return [
         {"date": end - timedelta(hours=LOOKBACK_HOURS - 1 - i),
          **_AIR_FALLBACK}
@@ -178,7 +179,7 @@ def fetch_meteo_now(date_str: str | None = None) -> dict:
     fallback cuando Open-Meteo no responde, o para alimentar el campo `meteo` del
     Snapshot que representa el estado meteo a t=0."""
     if date_str is None:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = now_local().strftime("%Y-%m-%d")
 
     headers = {"User-Agent": "Mozilla/5.0"}
     try:

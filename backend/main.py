@@ -14,7 +14,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import REFRESH_INTERVAL_MINUTES, REFRESH_TOKEN, POLLUTANTS
+from .config import REFRESH_INTERVAL_MINUTES, REFRESH_TOKEN, POLLUTANTS, now_local
 from .schemas import HealthResponse, Snapshot, Station
 from .snapshot import get_snapshot, regenerate_snapshot
 from .scheduler import start_scheduler, shutdown_scheduler, get_scheduler
@@ -66,7 +66,7 @@ def health():
     next_in = 0
     sched = get_scheduler()
     if sched and last_snap is not None:
-        elapsed = (datetime.now() - last_snap).total_seconds() / 60
+        elapsed = (now_local() - last_snap).total_seconds() / 60
         next_in = max(0, int(REFRESH_INTERVAL_MINUTES - elapsed))
     return HealthResponse(
         status="ok",
