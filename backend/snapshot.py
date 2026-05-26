@@ -51,8 +51,11 @@ def _build_snapshot() -> Snapshot:
     forecasts, forecast_start_at = get_forecasts()
     current = last_real_reading(air_history)
 
+    # Si NINGUNA estación tiene datos (GVA totalmente caída), last_real_hour queda
+    # como None para que el frontend pueda mostrar "sin datos" en vez de un timestamp
+    # engañoso ("hace 0 min" cuando no hay nada).
     all_dates = [r["date"] for rows in air_history.values() for r in rows if r.get("date")]
-    last_real_hour = max(all_dates) if all_dates else now_hour
+    last_real_hour = max(all_dates) if all_dates else None
 
     snap = Snapshot(
         generated_at=now_local(),
