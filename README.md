@@ -89,6 +89,9 @@ frontend/
 - **3 contaminantes**: PM2.5, NO₂, O₃ — con cobertura física distinta por estación
   (algunas no miden ciertos gases; aparecen en gris en el mapa).
 - **168 horas (7 días) de previsión** consecutivas, alineadas al timestamp del CSV.
+- El CSV de previsiones se **descarga automáticamente cada hora** desde un artifact
+  público de GitLab (variable `FORECAST_CSV_URL` en backend). Si se cambia la URL o
+  se quiere desactivar, ver `backend/README.md`.
 
 ## Despliegue (no esta activo)
 

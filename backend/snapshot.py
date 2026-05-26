@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 from .scrape import fetch_air_quality, fetch_meteo_now, last_real_reading
 from .weather import fetch_weather_window
-from .forecast_loader import get_forecasts, supported_stations
+from .forecast_loader import get_forecasts, refresh_csv, supported_stations
 from .schemas import Snapshot, Station, Meteo, AirReading
 from .stations import STATIONS
 
@@ -36,6 +36,10 @@ def _meteo_now_from_window(weather: dict, now_hour: datetime) -> dict:
 def _build_snapshot() -> Snapshot:
     """Combina lecturas reales + meteo actual + previsiones del CSV."""
     logger.info("Generando snapshot…")
+
+    # Descarga el CSV nuevo si hay URL configurada (FORECAST_CSV_URL).
+    # Si falla, el backend sigue funcionando con el CSV anterior en disco.
+    refresh_csv()
 
     air_history = fetch_air_quality()
     weather     = fetch_weather_window()

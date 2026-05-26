@@ -24,3 +24,8 @@ REFRESH_TOKEN = os.getenv("REFRESH_TOKEN", "")
 WEATHER_LAT = float(os.getenv("WEATHER_LAT", "39.4697"))
 WEATHER_LON = float(os.getenv("WEATHER_LON", "-0.3774"))
 WEATHER_TZ  = os.getenv("WEATHER_TZ", "Europe/Madrid")
+
+# URL pública del CSV de previsiones (artifact generado por el CI/CD del equipo de
+# modelado en GitLab). Si está vacía, el backend usa solo el archivo local en
+# backend/data/ y no descarga nada.
+FORECAST_CSV_URL = os.getenv("FORECAST_CSV_URL", "")
