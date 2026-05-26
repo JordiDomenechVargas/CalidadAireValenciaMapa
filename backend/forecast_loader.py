@@ -2,15 +2,21 @@
 
 El CSV vive en `backend/data/` y contiene 168 horas × 10 estaciones × 3 contaminantes
 (PM2.5, NO2, O3). Lo leemos en memoria al arrancar la API y cada vez que el archivo
-cambia de mtime (los compañeros lo regeneran diariamente, en breve cada hora).
+cambia de mtime.
+
+Si la variable de entorno `FORECAST_CSV_URL` está definida, antes de cada regeneración
+del snapshot se descarga el CSV desde esa URL (artifact público en GitLab) y se
+reemplaza el archivo local de forma atómica.
 """
 import logging
+import shutil
 import threading
 from datetime import datetime
 
 import pandas as pd
+import requests
 
-from .config import BACKEND_DIR, POLLUTANTS
+from .config import BACKEND_DIR, POLLUTANTS, FORECAST_CSV_URL
 from .stations import MODEL_NAME_TO_CANONICAL, STATION_NAMES, PHYSICAL_COVERAGE
 
 logger = logging.getLogger(__name__)
@@ -26,6 +32,42 @@ _COL_BY_POLLUTANT = {
 
 _cache: dict | None = None
 _lock = threading.Lock()
+
+
+def refresh_csv(url: str | None = None, timeout: int = 30) -> bool:
+    """Descarga el CSV desde la URL configurada y lo escribe atómicamente sobre
+    `CSV_PATH`. Si la descarga falla (timeout, 4xx/5xx, red caída), se hace log de
+    warning pero NO se rompe nada — el archivo previo (si existe) sigue intacto y
+    el resto del backend continúa funcionando con esos datos.
+
+    Args:
+        url: URL pública del CSV. Si es None, usa `FORECAST_CSV_URL` del config.
+        timeout: segundos antes de abandonar la descarga.
+
+    Returns:
+        True si la descarga + escritura tuvo éxito (el archivo local quedó actualizado).
+        False si no había URL configurada o si hubo cualquier error.
+    """
+    url = url or FORECAST_CSV_URL
+    if not url:
+        return False
+
+    tmp = CSV_PATH.with_suffix(".csv.tmp")
+    try:
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(resp.content)
+        shutil.move(str(tmp), str(CSV_PATH))
+        logger.info("CSV descargado desde %s (%d bytes)", url, len(resp.content))
+        return True
+    except Exception as e:  # noqa: BLE001 — log y degradación a archivo previo
+        logger.warning("No se pudo descargar el CSV desde %s: %s", url, e)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
 
 
 def _load() -> dict:

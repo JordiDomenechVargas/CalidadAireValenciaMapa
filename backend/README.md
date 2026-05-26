@@ -79,13 +79,39 @@ El CSV contiene previsiones para 9 estaciones × 3 contaminantes, pero filtramos
 Las estaciones sin cobertura física se devuelven en `supported_stations` excluidas para
 ese contaminante, y el frontend las pinta en gris en el mapa.
 
+## Auto-descarga del CSV de previsiones
+
+Cuando la variable `FORECAST_CSV_URL` está definida, el backend descarga el CSV
+automáticamente desde esa URL cada vez que el scheduler regenera el snapshot
+(`REFRESH_INTERVAL_MINUTES`, default 60). Así no hay que volver a copiarlo a mano.
+
+**Flujo en cada ciclo del scheduler:**
+
+1. `snapshot._build_snapshot()` llama primero a `forecast_loader.refresh_csv()`.
+2. `refresh_csv()` hace `GET` a `FORECAST_CSV_URL` con timeout de 30 s.
+3. Si la respuesta es 200, escribe el contenido en `backend/data/predicciones_contaminantes.csv.tmp`
+   y luego `move` atómico sobre el archivo real.
+4. Si falla la red, GitLab devuelve 5xx, timeout, etc. → log `WARNING` y se mantiene
+   el archivo previo intacto. El backend sigue funcionando con esos datos.
+5. `get_forecasts()` lee el archivo (detecta cambio por mtime y relee si toca).
+
+**Para forzar una descarga inmediata** desde la app, pulsar `🔄 Forzar actualización`
+en el sidebar (lanza `POST /refresh`, que regenera el snapshot y por tanto descarga).
+
+**Para cambiar el origen** del CSV: editar `FORECAST_CSV_URL` en *Settings → Variables*
+del HF Space (o en `.env` local) y reiniciar el contenedor.
+
+**Para desactivar la auto-descarga**: dejar `FORECAST_CSV_URL` vacía. El backend usará
+solo el archivo local en `backend/data/`.
+
 ## Despliegue en Hugging Face Spaces
 
 1. Crea un nuevo Space con SDK = **Docker**.
 2. Sube el contenido de `backend/` al Space (vía `git push` al remote del Space).
-3. Sube el CSV al Space en `data/predicciones_contaminantes.csv` — usa Git LFS si pesa
-   más de unos pocos MB, o un job que lo descargue del Drive del equipo (ver TODO).
+3. Si vas a usar la auto-descarga: NO subes el CSV manualmente, basta con poner la
+   variable `FORECAST_CSV_URL` en el siguiente paso y se descarga al arrancar.
 4. Configura variables de entorno en *Settings*:
+   - `FORECAST_CSV_URL=https://gitlab.com/api/v4/projects/82377482/jobs/artifacts/main/raw/public_output/predicciones_contaminantes.csv?job=publish_job`
    - `REFRESH_INTERVAL_MINUTES=60`
    - `WEATHER_LAT=39.4697`, `WEATHER_LON=-0.3774`, `WEATHER_TZ=Europe/Madrid`
    - `REFRESH_TOKEN` opcional si quieres proteger `POST /refresh`
@@ -96,7 +122,8 @@ Ver `.env.example`. Las principales:
 
 | Variable | Default | Para qué |
 |---|---|---|
-| `REFRESH_INTERVAL_MINUTES` | `60` | Frecuencia del scheduler |
+| `FORECAST_CSV_URL` | (vacío) | URL pública del artifact del CSV. Si está definida, el backend lo descarga automáticamente cada `REFRESH_INTERVAL_MINUTES`. Si vacía, se usa solo el archivo local. |
+| `REFRESH_INTERVAL_MINUTES` | `60` | Frecuencia con la que el scheduler regenera el snapshot (y descarga el CSV). |
 | `REFRESH_TOKEN` | (vacío) | Si lo defines, `POST /refresh` exige `X-Refresh-Token` |
 | `WEATHER_LAT`, `WEATHER_LON` | Valencia centro | Coordenadas para Open-Meteo |
 | `WEATHER_TZ` | `Europe/Madrid` | Zona horaria de Open-Meteo |

@@ -7,7 +7,9 @@ seleccionado.
 import warnings
 warnings.filterwarnings("ignore")
 
+import base64
 from datetime import datetime, date, time, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -19,6 +21,27 @@ from ui import (
     aqi_class, aqi_label,
     POLLUTANT_LABELS, POLLUTANT_UNITS,
 )
+
+
+_LOGO_CANDIDATES = (
+    "logo_ayuntamiento_vlc.jpg",
+    "ajuntament-valencia.png",
+)
+_MIME_BY_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".svg": "image/svg+xml"}
+
+
+@st.cache_data
+def _ajuntament_logo() -> tuple[str, str]:
+    """Devuelve (base64, mime_type) del logo del Ajuntament para embeber inline en HTML.
+    Busca en `assets/` el primer candidato que exista. Si ninguno existe, devuelve
+    ("", "") y el bloque del logo no se renderiza."""
+    assets_dir = Path(__file__).parent / "assets"
+    for filename in _LOGO_CANDIDATES:
+        path = assets_dir / filename
+        if path.exists():
+            mime = _MIME_BY_EXT.get(path.suffix.lower(), "image/png")
+            return base64.b64encode(path.read_bytes()).decode(), mime
+    return "", ""
 
 _DAYS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 _MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
@@ -80,24 +103,41 @@ section[data-testid="stSidebar"] {
 div[data-testid="stDeployButton"] { display: none !important; }
 [data-testid="stToolbarActions"] { display: none !important; }
 
-.valencia-badge {
+.ajuntament-link {
     position: fixed;
     top: 12px;
     right: 18px;
     z-index: 999999;
-    font-family: 'Space Mono', monospace;
-    font-size: 13px;
-    font-weight: 700;
-    color: #1f2328;
+    display: inline-block;
     background: #ffffff;
     border: 1px solid #d0d7de;
     border-radius: 6px;
-    padding: 6px 12px;
+    padding: 4px 10px;
     box-shadow: 0 1px 3px rgba(31,35,40,0.08);
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+    text-decoration: none;
+}
+.ajuntament-link:hover {
+    box-shadow: 0 2px 8px rgba(31,35,40,0.18);
+    transform: translateY(-1px);
+}
+.ajuntament-link img {
+    height: 28px;
+    display: block;
 }
 </style>
-<div class="valencia-badge">📍 Valencia</div>
 """, unsafe_allow_html=True)
+
+# Logo del Ajuntament + link al portal de datos abiertos (esquina superior derecha)
+_logo_b64, _logo_mime = _ajuntament_logo()
+if _logo_b64:
+    st.markdown(
+        f'<a class="ajuntament-link" href="https://opendata.vlci.valencia.es/" '
+        f'target="_blank" rel="noopener" title="Datos abiertos · Ajuntament de València">'
+        f'<img src="data:{_logo_mime};base64,{_logo_b64}" alt="Ajuntament de València" />'
+        f'</a>',
+        unsafe_allow_html=True,
+    )
 
 
 POLLUTANT_OPTIONS = ["PM2.5", "NO₂", "O₃"]
