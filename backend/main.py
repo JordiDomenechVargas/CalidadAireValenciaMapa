@@ -111,7 +111,11 @@ def forecast(pollutant: str, station_name: str):
 def refresh(x_refresh_token: str | None = Header(default=None, alias="X-Refresh-Token")):
     if REFRESH_TOKEN and x_refresh_token != REFRESH_TOKEN:
         raise HTTPException(status_code=401, detail="Token de refresco inválido.")
-    snap = regenerate_snapshot()
+    try:
+        snap = regenerate_snapshot()
+    except Exception as exc:
+        logger.exception("Error en /refresh: %s", exc)
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
     return HealthResponse(
         status="ok",
         last_snapshot=snap.generated_at,
