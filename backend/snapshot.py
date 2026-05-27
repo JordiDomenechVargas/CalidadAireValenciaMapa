@@ -68,7 +68,8 @@ def _build_snapshot() -> Snapshot:
         supported_stations=supported_stations(),
     )
     logger.info("Snapshot generado · forecast_start=%s · last_real=%s",
-                forecast_start_at.isoformat(), last_real_hour.isoformat())
+                forecast_start_at.isoformat() if forecast_start_at else "N/A",
+                last_real_hour.isoformat() if last_real_hour else "sin datos GVA")
     return snap
 
 
