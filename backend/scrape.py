@@ -13,16 +13,26 @@ from .config import LOOKBACK_HOURS, now_local, METEO_FALLBACK
 
 logger = logging.getLogger(__name__)
 
-# Endpoint JSON de la RVVCCA — devuelve mediciones horarias del intervalo [start, finish].
+# Endpoint Pentaho directo (bi.pica.gva.es). El proxy rvvcca.pica.gva.es/downloadformat
+# que usábamos antes devuelve 500 de forma intermitente; llamamos directamente al backend.
 _RVVCCA_JSON_TPL = (
-    "https://rvvcca.pica.gva.es/downloadformat/hourly/cda/json?file="
-    "https://bi.pica.gva.es/pentaho/plugin/cda/api/doQuery?_TRUST_USER_=opendata_gva"
+    "https://bi.pica.gva.es/pentaho/plugin/cda/api/doQuery"
+    "?_TRUST_USER_=opendata_gva"
     "&path=/public/gva/verticals/sql/hourlyAverage.cda"
     "&dataAccessId=HourlyAverage"
     "&paramstart={start}%2000%3A00%3A00"
     "&paramfinish={finish}%2023%3A59%3A59"
     "&paramidStation={code}"
 )
+
+# Mapeo mgabb (abreviatura Pentaho) → clave interna
+_MGABB_TO_GAS: dict[str, str] = {
+    "PM2.5": "PM25",
+    "NO2":   "NO2",
+    "O3":    "O3",
+    "SO2":   "SO2",
+    "CO":    "CO",
+}
 
 _METEO_URL_TPL = "https://meteostat.net/es/station/08284?t={date}/{date}"
 
@@ -45,20 +55,37 @@ def _safe_float(v) -> float | None:
         return None
 
 
-def _parse_row(row: dict) -> dict | None:
-    """Normaliza una fila del JSON a {date, PM25, NO2, O3, SO2, CO}. None si no hay nada útil."""
-    pm25 = _safe_float(row.get("PM2.5"))
-    no2  = _safe_float(row.get("NO2"))
-    o3   = _safe_float(row.get("O3"))
-    so2  = _safe_float(row.get("SO2"))
-    co   = _safe_float(row.get("CO"))
-    if pm25 is None and no2 is None and o3 is None:
-        return None
-    try:
-        dt = datetime.strptime(row["date"], "%Y-%m-%d %H:%M")
-    except (KeyError, ValueError):
-        return None
-    return {"date": dt, "PM25": pm25, "NO2": no2, "O3": o3, "SO2": so2, "CO": co}
+def _parse_pentaho(data: dict) -> list[dict]:
+    """Convierte la respuesta JSON de Pentaho {metadata, resultset} a una lista de
+    {date, PM25, NO2, O3, SO2, CO} agrupada por hora. Cada fila de resultset representa
+    una medición de UN contaminante; aquí las agrupamos por timestamp."""
+    meta_idx = {col["colName"]: col["colIndex"] for col in data.get("metadata", [])}
+    i_abb  = meta_idx.get("mgabb", 3)
+    i_val  = meta_idx.get("value", 7)
+    i_date = meta_idx.get("date",  9)
+
+    by_dt: dict[datetime, dict] = {}
+    for row in data.get("resultset", []):
+        gas = _MGABB_TO_GAS.get(row[i_abb])
+        if gas is None:
+            continue
+        val = _safe_float(row[i_val])
+        if val is None:
+            continue
+        # El timestamp de Pentaho puede ser "2026-05-27 18:00:00.0" → truncamos a minuto
+        date_str = str(row[i_date])[:16]
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if dt not in by_dt:
+            by_dt[dt] = {"date": dt, "PM25": None, "NO2": None, "O3": None, "SO2": None, "CO": None}
+        by_dt[dt][gas] = val
+
+    # Solo filas con al menos uno de los tres gases principales
+    result = [r for r in by_dt.values() if any(r[g] is not None for g in ("PM25", "NO2", "O3"))]
+    result.sort(key=lambda r: r["date"])
+    return result
 
 
 def _fetch_station_history(name: str, code: str) -> tuple[str, list[dict]]:
@@ -77,12 +104,11 @@ def _fetch_station_history(name: str, code: str) -> tuple[str, list[dict]]:
             if resp.status_code >= 500:
                 raise requests.HTTPError(f"{resp.status_code} {resp.reason}", response=resp)
             resp.raise_for_status()
-            rows = resp.json()
-            if not isinstance(rows, list):
+            data = resp.json()
+            if not isinstance(data, dict) or "resultset" not in data:
                 return name, []
 
-            parsed = [r for r in (_parse_row(row) for row in rows) if r is not None]
-            parsed.sort(key=lambda r: r["date"])
+            parsed = _parse_pentaho(data)
             # Devolvemos hasta las últimas LOOKBACK_HOURS filas (el bucle del modelo necesita 48).
             return name, parsed[-LOOKBACK_HOURS:]
 
